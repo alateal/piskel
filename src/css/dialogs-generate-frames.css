@@ -1,0 +1,36 @@
+.generate-frames-container {
+  width: 500px;
+  top: 50%;
+  left: 50%;
+  position: absolute;
+  transform: translate(-50%, -50%);
+}
+
+.generate-frames-container .dialog-content {
+  padding: 20px;
+}
+
+.generate-frames-container .input-group {
+  margin-bottom: 15px;
+  display: flex;
+  align-items: center;
+}
+
+.generate-frames-container .input-group label {
+  width: 200px;
+  display: inline-block;
+}
+
+.generate-frames-container .textfield {
+  width: 100px;
+  margin-left: 10px;
+}
+
+.generate-frames-container .dialog-actions {
+  text-align: right;
+  padding: 20px;
+}
+
+.generate-frames-container .button {
+  margin-left: 10px;
+} 

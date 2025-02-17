@@ -25,7 +25,12 @@
     this.initDragndropBehavior_();
   };
 
+  // Add event handling mixin
+  pskl.utils.inherit(ns.FramesListController, pskl.controller.AbstractController);
+
   ns.FramesListController.prototype.init = function() {
+    this.superclass.init.call(this);
+
     $.subscribe(Events.TOOL_RELEASED, this.flagForRedraw_.bind(this));
     $.subscribe(Events.PISKEL_RESET, this.flagForRedraw_.bind(this, true));
     $.subscribe(Events.USER_SETTINGS_CHANGED, this.flagForRedraw_.bind(this));
@@ -98,12 +103,14 @@
     if (action === ACTION.CLONE) {
       this.piskelController.duplicateFrameAt(index);
       var clonedTile = this.createPreviewTile_(index + 1);
-      this.previewList.insertBefore(clonedTile, this.tiles[index].nextSibling);
+      var wrapper = this.previewList.querySelector('.preview-list-wrapper');
+      wrapper.insertBefore(clonedTile, this.tiles[index].nextSibling);
       this.tiles.splice(index, 0, clonedTile);
       this.updateScrollerOverflows();
     } else if (action === ACTION.DELETE) {
       this.piskelController.removeFrameAt(index);
-      this.previewList.removeChild(this.tiles[index]);
+      var wrapper = this.previewList.querySelector('.preview-list-wrapper');
+      wrapper.removeChild(this.tiles[index]);
       this.tiles.splice(index, 1);
       this.updateScrollerOverflows();
     } else if (action === ACTION.SELECT && !this.justDropped) {
@@ -112,7 +119,8 @@
       this.piskelController.addFrame();
       var newtile = this.createPreviewTile_(this.tiles.length);
       this.tiles.push(newtile);
-      this.previewList.insertBefore(newtile, this.addFrameTile);
+      var wrapper = this.previewList.querySelector('.preview-list-wrapper');
+      wrapper.insertBefore(newtile, this.addFrameTile);
       this.updateScrollerOverflows();
     }
 
@@ -161,16 +169,22 @@
   ns.FramesListController.prototype.createPreviews_ = function () {
     this.previewList.innerHTML = '';
 
+    // Create a wrapper for the frame previews
+    var previewListWrapper = document.createElement('div');
+    previewListWrapper.className = 'preview-list-wrapper';
+    this.previewList.appendChild(previewListWrapper);
+
     // Manually remove tooltips since mouseout events were shortcut by the DOM refresh:
     $('.tooltip').remove();
 
     var frameCount = this.piskelController.getFrameCount();
 
-    for (var i = 0 ; i < frameCount ; i++) {
+    for (var i = 0; i < frameCount; i++) {
       var tile = this.createPreviewTile_(i);
-      this.previewList.appendChild(tile);
+      previewListWrapper.appendChild(tile);
       this.tiles[i] = tile;
     }
+
     // Append 'new empty frame' button
     var newFrameButton = document.createElement('div');
     newFrameButton.id = 'add-frame-action';
@@ -178,8 +192,17 @@
     newFrameButton.setAttribute('data-tile-action', ACTION.NEW_FRAME);
     newFrameButton.innerHTML = '<div class="add-frame-action-icon icon-frame-plus-white">' +
       '</div><div class="label">Add new frame</div>';
-    this.previewList.appendChild(newFrameButton);
+    previewListWrapper.appendChild(newFrameButton);
     this.addFrameTile = newFrameButton;
+
+    // Add generate frames button after preview list
+    var generateFramesButton = document.createElement('button');
+    generateFramesButton.className = 'button generate-frames-button';
+    generateFramesButton.title = 'Generate intermediate frames';
+    generateFramesButton.textContent = 'Generate Frames';
+    this.previewList.appendChild(generateFramesButton);
+
+    this.addEventListener(generateFramesButton, 'click', this.onGenerateFramesClick_);
 
     this.updateScrollerOverflows();
   };
@@ -321,5 +344,10 @@
     var frameSize = Math.max(frame.getHeight(), frame.getWidth());
 
     return Constants.PREVIEW_FILM_SIZE / frameSize;
+  };
+
+  // Add handler for generate frames click
+  ns.FramesListController.prototype.onGenerateFramesClick_ = function () {
+    $.publish(Events.SHOW_GENERATE_FRAMES_MODAL);
   };
 })();

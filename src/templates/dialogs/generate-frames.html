@@ -1,0 +1,34 @@
+<script type="text/template" id="templates/dialogs/generate-frames.html">
+  <div class="dialog-wrapper generate-frames">
+    <h3 class="dialog-head">
+      Generate Intermediate Frames
+      <span class="dialog-close">X</span>
+    </h3>
+    <div class="dialog-content">
+      <div class="frame-selection-section">
+        <p class="selection-instruction">Choose start and end frames:</p>
+        <div class="frame-selector">
+          <!-- Frames will be populated by JS -->
+        </div>
+      </div>
+
+      <div class="frame-count-section">
+        <p class="selection-instruction">Number of frames to generate:</p>
+        <div class="slider-container">
+          <input type="range" 
+                 class="frame-count-slider" 
+                 id="frame-count" 
+                 min="1" 
+                 max="10" 
+                 value="1">
+          <span class="slider-value">1</span>
+        </div>
+      </div>
+
+      <div class="dialog-actions">
+        <button class="button generate-button">Generate</button>
+        <button class="button cancel-button">Cancel</button>
+      </div>
+    </div>
+  </div>
+</script> 

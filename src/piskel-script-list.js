@@ -104,6 +104,7 @@
   "js/rendering/PiskelRenderer.js",
 
   // Controllers
+  "js/controller/AbstractController.js",
   "js/controller/piskel/PiskelController.js",
   "js/controller/piskel/PublicPiskelController.js",
   "js/controller/CursorCoordinatesController.js",
@@ -160,6 +161,7 @@
   "js/controller/dialogs/importwizard/ImportWizard.js",
   "js/controller/dialogs/PerformanceInfoController.js",
   "js/controller/dialogs/UnsupportedBrowserController.js",
+  "js/controller/dialogs/GenerateFramesController.js",
 
   // Dialogs controller
   "js/controller/dialogs/DialogsController.js",
@@ -266,5 +268,5 @@
   "js/app.js",
 
   // Bonus features !!
-  "js/snippets.js"
+  "js/snippets.js",
 ];

@@ -180,3 +180,40 @@
   border: 3px dashed var(--highlight-color);
   background-color: rgba(255, 215,0, 0.2);
 }
+
+.generate-frames-button {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 10px;
+  text-align: center;
+  background-color: #444;
+  border: 1px solid gold;
+  color: gold;
+  border-radius: 2px;
+  padding: 5px;
+  cursor: pointer;
+}
+
+.generate-frames-button:hover {
+  background-color: #666;
+}
+
+#preview-list {
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+  padding-bottom: 0;
+  height: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.preview-list-wrapper {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.add-frame-action {
+  margin-top: auto;
+}

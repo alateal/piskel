@@ -1,47 +1,46 @@
 (function () {
   var ns = $.namespace('pskl.utils');
 
-  ns.Event = {};
+  var listeners = {};
+  var listenerCount = 0;
 
-  ns.Event.addEventListener = function (el, type, callback, scope, args) {
-    if (typeof el === 'string') {
-      el = document.querySelector(el);
-    }
+  ns.Event = {
+    addEventListener : function (target, type, callback, scope) {
+      if (typeof target === 'string') {
+        // Support for using selectors as target
+        var elements = document.querySelectorAll(target);
+        for (var i = 0 ; i < elements.length ; i++) {
+          this.addEventListener(elements[i], type, callback, scope);
+        }
+        return;
+      }
 
-    var listener = {
-      el : el,
-      type : type,
-      callback : callback,
-      handler : args ? callback.bind(scope, args) : callback.bind(scope)
-    };
+      var listener = {
+        type: type,
+        callback: callback,
+        scope: scope,
+        target: target
+      };
 
-    scope.__pskl_listeners = scope.__pskl_listeners || [];
-    scope.__pskl_listeners.push(listener);
-    el.addEventListener(type, listener.handler);
-  };
+      var listenerId = listenerCount++;
+      listeners[listenerId] = listener;
 
-  ns.Event.removeEventListener = function (el, type, callback, scope) {
-    if (scope && scope.__pskl_listeners) {
-      var listeners = scope.__pskl_listeners;
-      for (var i = 0 ; i < listeners.length ; i++) {
-        var listener = listeners[i];
-        if (listener.callback === callback && listener.el === el  && listener.type === type) {
-          el.removeEventListener(type, listeners[i].handler);
-          listeners.splice(i, 1);
-          break;
+      var boundCallback = callback.bind(scope);
+      listener.boundCallback = boundCallback;
+      target.addEventListener(type, boundCallback);
+    },
+
+    removeAllEventListeners : function (scope) {
+      for (var listenerId in listeners) {
+        if (listeners[listenerId].scope === scope) {
+          var listener = listeners[listenerId];
+          listener.target.removeEventListener(
+            listener.type, 
+            listener.boundCallback
+          );
+          delete listeners[listenerId];
         }
       }
-    }
-  };
-
-  ns.Event.removeAllEventListeners = function (scope) {
-    if (scope && scope.__pskl_listeners) {
-      var listeners = scope.__pskl_listeners;
-      for (var i = 0 ; i < listeners.length ; i++) {
-        var listener = listeners[i];
-        listener.el.removeEventListener(listener.type, listener.handler);
-      }
-      scope.__pskl_listeners = [];
     }
   };
 })();

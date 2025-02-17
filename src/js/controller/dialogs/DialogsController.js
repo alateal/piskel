@@ -29,6 +29,10 @@
     'browse-backups' : {
       template : 'templates/dialogs/browse-backups.html',
       controller : ns.backups.BrowseBackups
+    },
+    'generate-frames': {
+      template: 'templates/dialogs/generate-frames.html',
+      controller: ns.GenerateFramesController
     }
   };
 
@@ -55,6 +59,9 @@
     // adding the .animated class here instead of in the markup to avoid an animation during app startup
     this.dialogWrapper_.classList.add('animated');
     pskl.utils.Event.addEventListener(this.dialogWrapper_, 'click', this.onWrapperClicked_, this);
+
+    // Add event handler for showing generate frames modal
+    $.subscribe(Events.SHOW_GENERATE_FRAMES_MODAL, this.showGenerateFramesDialog.bind(this));
   };
 
   ns.DialogsController.prototype.onCreatePaletteShortcut_ = function () {
@@ -100,10 +107,15 @@
     }
 
     this.dialogContainer_.classList.add(dialogId);
-
     this.dialogContainer_.innerHTML = pskl.utils.Template.get(config.template);
+
     var controller = new config.controller(this.piskelController);
     controller.init(initArgs);
+
+    // Call onShow after the dialog is added to DOM
+    if (typeof controller.onShow === 'function') {
+      controller.onShow();
+    }
 
     this.currentDialog_ = {
       id : dialogId,
@@ -143,6 +155,10 @@
       return this.currentDialog_.id;
     }
     return null;
+  };
+
+  ns.DialogsController.prototype.showGenerateFramesDialog = function () {
+    this.showDialog('generate-frames');
   };
 
 })();

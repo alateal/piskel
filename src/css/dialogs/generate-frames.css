@@ -1,0 +1,131 @@
+/* Override the base dialog styles for generate-frames */
+#dialog-container-wrapper.show {
+  padding: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+#dialog-container {
+  width: auto;
+  height: auto;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.dialog-wrapper.generate-frames {
+  width: 400px;
+  height: auto;
+  margin: 0;
+  position: static;
+}
+
+.generate-frames .dialog-head {
+  background: #222;
+  padding: 8px 10px;
+  color: gold;
+  font-size: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: static;
+  height: auto;
+}
+
+.generate-frames .dialog-close {
+  cursor: pointer;
+  color: #666;
+}
+
+.generate-frames .dialog-close:hover {
+  color: gold;
+}
+
+.generate-frames .dialog-content {
+  position: static;
+  padding: 20px;
+  width: auto;
+}
+
+.generate-frames .selection-instruction {
+  color: #eee;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.generate-frames .frame-selector {
+  height: 120px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  background: #333;
+  border: 1px solid #666;
+  padding: 10px;
+  margin-bottom: 20px;
+}
+
+.generate-frames .frame-preview {
+  display: inline-block;
+  width: 80px;
+  height: 80px;
+  margin-right: 10px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  vertical-align: top;
+  background: #222;
+}
+
+.generate-frames .frame-preview.selected {
+  border-color: gold;
+}
+
+.generate-frames .frame-preview:hover {
+  border-color: #999;
+}
+
+.generate-frames .slider-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.generate-frames .frame-count-slider {
+  flex: 1;
+  height: 4px;
+  -webkit-appearance: none;
+  background: #666;
+  outline: none;
+}
+
+.generate-frames .frame-count-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: gold;
+  cursor: pointer;
+}
+
+.generate-frames .slider-value {
+  color: #eee;
+  min-width: 20px;
+  text-align: right;
+}
+
+.generate-frames .dialog-actions {
+  text-align: right;
+  margin-top: 10px;
+}
+
+.generate-frames .dialog-actions .button {
+  margin-left: 8px;
+  padding: 4px 8px;
+  background: #222;
+  border: 1px solid #666;
+  color: #eee;
+}
+
+.generate-frames .dialog-actions .button:hover {
+  border-color: gold;
+} 

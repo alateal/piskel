@@ -1,0 +1,30 @@
+<script type="text/template" id="templates/dialogs/generate-frames.html">
+  <div class="dialog-container generate-frames-container">
+    <h3 class="dialog-title">Generate Intermediate Frames</h3>
+    <div class="dialog-content">
+      <div class="frame-selection">
+        <div class="frame-picker-section">
+          <label>Start Frame:</label>
+          <div class="start-frame-picker"></div>
+          <input type="number" class="textfield start-frame-input" min="1"/>
+        </div>
+        
+        <div class="frame-picker-section">
+          <label>End Frame:</label>
+          <div class="end-frame-picker"></div>
+          <input type="number" class="textfield end-frame-input" min="1"/>
+        </div>
+        
+        <div class="frame-count-section">
+          <label>Number of frames to generate:</label>
+          <input type="number" class="textfield frame-count-input" min="1" value="1"/>
+        </div>
+      </div>
+      
+      <div class="button-container">
+        <button class="button generate-button button-primary">Generate</button>
+        <button class="button cancel-button">Cancel</button>
+      </div>
+    </div>
+  </div>
+</script> 
