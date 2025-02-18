@@ -179,6 +179,7 @@
 
   // Services
   "js/service/storage/StorageService.js",
+  "js/service/InterpolationService.js",
   "js/service/storage/FileDownloadStorageService.js",
   "js/service/storage/IndexedDbStorageService.js",
   "js/service/storage/LocalStorageService.js",

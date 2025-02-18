@@ -40,6 +40,8 @@
     this.piskelController = piskelController;
     this.closePopupShortcut = pskl.service.keyboard.Shortcuts.MISC.CLOSE_POPUP;
     this.currentDialog_ = null;
+    this.dialogs = dialogs;
+    this.activeDialog = null;
   };
 
   ns.DialogsController.prototype.init = function () {
@@ -100,7 +102,7 @@
       return;
     }
 
-    var config = dialogs[dialogId];
+    var config = this.dialogs[dialogId];
     if (!config) {
       console.error('Could not find dialog configuration for dialogId : ' + dialogId);
       return;

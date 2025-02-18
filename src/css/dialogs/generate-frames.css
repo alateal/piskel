@@ -128,4 +128,45 @@
 
 .generate-frames .dialog-actions .button:hover {
   border-color: gold;
+}
+
+.generate-frames-error {
+  background: #ff4444;
+  color: white;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border-radius: 3px;
+  font-size: 13px;
+  display: none;
+}
+
+.generate-frames .loading-indicator {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  align-items: center;
+  justify-content: center;
+  color: gold;
+  font-size: 14px;
+}
+
+.generate-frames .loading-indicator.show {
+  display: flex;
+}
+
+/* Add frame preview specific styles */
+.generate-frames .frame-preview canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  width: 100%;
+  height: 100%;
+  background: #222;
+}
+
+.generate-frames .frame-preview.selected canvas {
+  outline: 2px solid gold;
 } 

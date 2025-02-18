@@ -348,6 +348,9 @@
 
   // Add handler for generate frames click
   ns.FramesListController.prototype.onGenerateFramesClick_ = function () {
-    $.publish(Events.SHOW_GENERATE_FRAMES_MODAL);
+    $.publish(Events.DIALOG_SHOW, {
+      dialogId: 'generate-frames',
+      initArgs: this.piskelController
+    });
   };
 })();
