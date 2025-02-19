@@ -15,6 +15,8 @@
       width: 256,
       height: 256
     };
+    this.regions = new Map();
+    this.tinyRegions = [];
   };
 
   ns.FlowNetService.prototype.init = async function (progressCallback) {
@@ -167,14 +169,14 @@
         const tensor1 = interpolationService.frameToTensor(frame1);
         const tensor2 = interpolationService.frameToTensor(frame2);
         
-        // Extract RGB channels
+        // Extract RGB channels and ensure 3 channels
         const rgb1 = tensor1.slice([0, 0, 0], [-1, -1, 3]);
         const rgb2 = tensor2.slice([0, 0, 0], [-1, -1, 3]);
 
         // Get original dimensions
-        const [h, w] = rgb1.shape;
+        const [originalH, originalW] = rgb1.shape;
 
-        // Resize to 256x256 for model input
+        // Resize to 256x256 for model input (FlowNet requirement)
         const resized1 = tf.image.resizeBilinear(rgb1, [256, 256]);
         const resized2 = tf.image.resizeBilinear(rgb2, [256, 256]);
         
@@ -189,20 +191,23 @@
         // Resize flow back to original dimensions
         const resizedFlow = tf.image.resizeBilinear(
           flow.expandDims(0),
-          [h, w]
+          [originalH, originalW]
         ).squeeze(0);
 
         // Scale the flow values to account for the resize
-        const scaleY = h / 256;
-        const scaleX = w / 256;
+        const scaleY = originalH / 256;
+        const scaleX = originalW / 256;
         
-        // Scale flow to pixel space with smaller magnitude
+        // Apply scaling to maintain proper motion magnitude
         const scaledFlow = tf.mul(
           resizedFlow,
           tf.tensor([scaleY, scaleX]).reshape([1, 1, 2])
-        ).mul(0.5); // Reduce flow magnitude
+        ).mul(0.5);
+
+        // Apply motion vector quantization with original frame dimensions
+        const quantizedFlow = this.quantizeFlow(scaledFlow, frame1);
         
-        return scaledFlow;
+        return quantizedFlow;
       });
     } catch (error) {
       console.error('Flow computation failed:', error);
@@ -292,7 +297,10 @@
       const tensor = interpolationService.frameToTensor(frame);
       const [h, w, channels] = tensor.shape;
       
-      // Ensure flow has correct shape [height, width, 2]
+      // Detect edges
+      const edgeInfo = this.detectEdges(tensor);
+      
+      // Ensure flow has correct shape
       let processedFlow = flow;
       if (flow.rank !== 3) {
         processedFlow = flow.reshape([h, w, 2]);
@@ -319,10 +327,11 @@
       // Create output tensor
       const output = tf.buffer([h, w, channels]);
       
-      // Perform bilinear sampling manually
+      // Get data for processing
       const tensorData = tensor.arraySync();
       const sampleXData = sampleX.arraySync();
       const sampleYData = sampleY.arraySync();
+      const edgeData = edgeInfo.edges.arraySync();
       
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
@@ -334,31 +343,40 @@
           sx = Math.max(0, Math.min(w - 1, sx));
           sy = Math.max(0, Math.min(h - 1, sy));
           
-          // Get integer and fractional parts
-          const x0 = Math.floor(sx);
-          const y0 = Math.floor(sy);
-          const x1 = Math.min(x0 + 1, w - 1);
-          const y1 = Math.min(y0 + 1, h - 1);
-          
-          const wx = sx - x0;
-          const wy = sy - y0;
-          
-          // Perform bilinear interpolation for each channel
-          for (let c = 0; c < channels; c++) {
-            const v00 = tensorData[y0][x0][c];
-            const v01 = tensorData[y0][x1][c];
-            const v10 = tensorData[y1][x0][c];
-            const v11 = tensorData[y1][x1][c];
+          // Use nearest neighbor sampling for edge pixels
+          if (edgeData[y][x] > 0.5) {
+            const x0 = Math.round(sx);
+            const y0 = Math.round(sy);
             
-            const value = (1 - wy) * ((1 - wx) * v00 + wx * v01) +
-                         wy * ((1 - wx) * v10 + wx * v11);
+            for (let c = 0; c < channels; c++) {
+              output.set(tensorData[y0][x0][c], y, x, c);
+            }
+          } else {
+            // Use bilinear sampling for non-edge pixels
+            const x0 = Math.floor(sx);
+            const y0 = Math.floor(sy);
+            const x1 = Math.min(x0 + 1, w - 1);
+            const y1 = Math.min(y0 + 1, h - 1);
             
-            output.set(value, y, x, c);
+            const wx = sx - x0;
+            const wy = sy - y0;
+            
+            for (let c = 0; c < channels; c++) {
+              const v00 = tensorData[y0][x0][c];
+              const v01 = tensorData[y0][x1][c];
+              const v10 = tensorData[y1][x0][c];
+              const v11 = tensorData[y1][x1][c];
+              
+              const value = (1 - wy) * ((1 - wx) * v00 + wx * v01) +
+                           wy * ((1 - wx) * v10 + wx * v11);
+              
+              output.set(value, y, x, c);
+            }
           }
         }
       }
       
-      // Create edge mask
+      // Create edge mask with padding
       const mask = tf.buffer([h, w, channels]);
       const padding = 2;
       for (let i = padding; i < h - padding; i++) {
@@ -375,45 +393,26 @@
     });
   };
 
-  // Update smoothFlow to ensure consistent tensor shapes
+  // Update smoothFlow to handle single-channel input
   ns.FlowNetService.prototype.smoothFlow = function(flow) {
     return tf.tidy(() => {
-      // Apply Gaussian blur to flow field
       const kernel = tf.tensor2d([
         [1, 2, 1],
         [2, 4, 2],
         [1, 2, 1]
       ]).div(16);
 
-      // Get flow dimensions
-      const [h, w, c] = flow.shape;
-      console.log('Flow shape in smoothFlow:', [h, w, c]);
-
-      // Split flow into Y and X components
-      const flowChannels = tf.split(flow, 2, -1);
-      const flowY = flowChannels[0];
-      const flowX = flowChannels[1];
-
-      // Expand kernel for 2D convolution
+      // Ensure flow is 3D for conv2d
+      const flow3D = flow.expandDims(0).expandDims(-1);
       const kernelExpanded = kernel.expandDims(-1).expandDims(-1);
 
-      // Apply smoothing to each component
-      const smoothedX = tf.conv2d(
-        flowX.reshape([1, h, w, 1]),
+      // Apply smoothing
+      return tf.conv2d(
+        flow3D,
         kernelExpanded,
         1,
         'same'
-      ).squeeze([0]); // Remove batch dimension
-
-      const smoothedY = tf.conv2d(
-        flowY.reshape([1, h, w, 1]),
-        kernelExpanded,
-        1,
-        'same'
-      ).squeeze([0]);
-
-      // Stack the smoothed components back together
-      return tf.stack([smoothedY, smoothedX], -1);
+      ).squeeze([0, -1]); // Remove batch and channel dimensions
     });
   };
 
@@ -583,5 +582,691 @@
       console.error('Detailed preprocessing test failed:', error);
       return false;
     }
+  };
+
+  // Add edge detection methods
+  ns.FlowNetService.prototype.detectEdges = function(tensor, threshold = 0.1) {
+    return tf.tidy(() => {
+      // Sobel kernels for edge detection
+      const sobelX = tf.tensor2d([
+        [-1, 0, 1],
+        [-2, 0, 2],
+        [-1, 0, 1]
+      ]).expandDims(-1).expandDims(-1);
+
+      const sobelY = tf.tensor2d([
+        [-1, -2, -1],
+        [0, 0, 0],
+        [1, 2, 1]
+      ]).expandDims(-1).expandDims(-1);
+
+      // Convert to grayscale with perceptual weights
+      let grayscale;
+      if (tensor.shape[2] === 4) {
+        const rgb = tensor.slice([0, 0, 0], [-1, -1, 3]);
+        // Use perceptual weights for better edge detection
+        grayscale = rgb.mul(tf.tensor3d([0.299, 0.587, 0.114], [1, 1, 3])).sum(-1);
+      } else {
+        grayscale = tensor.mean(-1);
+      }
+
+      // Ensure proper shape for convolution
+      grayscale = grayscale.expandDims(-1);
+
+      // Apply Sobel with stronger edge detection
+      const gx = tf.conv2d(grayscale.expandDims(0), sobelX, 1, 'same').squeeze(0);
+      const gy = tf.conv2d(grayscale.expandDims(0), sobelY, 1, 'same').squeeze(0);
+
+      // Compute edge magnitude with non-linear enhancement
+      const magnitude = tf.sqrt(tf.square(gx).add(tf.square(gy))).squeeze(-1);
+      const enhanced = tf.pow(magnitude, tf.scalar(1.5)); // Non-linear enhancement
+      
+      // Normalize and apply adaptive threshold
+      const normalizedEdges = enhanced.div(enhanced.max());
+      const edges = normalizedEdges.greater(threshold);
+
+      return {
+        edges: edges,
+        magnitude: normalizedEdges
+      };
+    });
+  };
+
+  // Modify quantizeFlow to use edge information
+  ns.FlowNetService.prototype.quantizeFlow = function(flow, frame) {
+    return tf.tidy(() => {
+      const interpolationService = new pskl.service.InterpolationService();
+      const tensor = interpolationService.frameToTensor(frame);
+      
+      // Get dimensions from the flow tensor
+      const [h, w] = flow.shape.slice(0, 2);
+      const resizedTensor = tf.image.resizeBilinear(tensor, [h, w]);
+      
+      // More granular edge detection with three levels
+      const edgeInfo1 = this.detectEdges(resizedTensor, 0.015); // Very fine details
+      const edgeInfo2 = this.detectEdges(resizedTensor, 0.03);  // Medium details
+      const edgeInfo3 = this.detectEdges(resizedTensor, 0.06);  // Strong edges
+      
+      // Split flow into components
+      const [flowY, flowX] = tf.split(flow, 2, -1);
+      
+      // Compute flow statistics
+      const flowMagnitude = tf.sqrt(tf.square(flowX).add(tf.square(flowY)));
+      const maxFlow = flowMagnitude.max();
+      
+      // More granular quantization levels for smoother transitions
+      const quantLevels = [0.05, 0.1, 0.2, 0.35, 0.5];
+      const quantizedFlows = quantLevels.map(level => {
+        const threshold = maxFlow.mul(level);
+        // Add small random offset to break up banding
+        const noiseScale = threshold.mul(0.1);
+        const noise = tf.randomUniform(flowX.shape, -1, 1).mul(noiseScale);
+        
+        return {
+          x: tf.round(flowX.add(noise).div(threshold)).mul(threshold),
+          y: tf.round(flowY.add(noise).div(threshold)).mul(threshold)
+        };
+      });
+      
+      // Initialize with original flow
+      let refinedX = flowX;
+      let refinedY = flowY;
+      
+      // Progressive refinement with smoother transitions
+      quantLevels.forEach((level, i) => {
+        const threshold = maxFlow.mul(level);
+        const magnitudeMask = flowMagnitude.greater(threshold);
+        
+        // Smoother transition curve using sigmoid-like function
+        const transitionWidth = threshold.mul(0.3); // Wider transition region
+        const transitionWeight = flowMagnitude.sub(threshold)
+          .div(transitionWidth)
+          .tanh()
+          .add(1)
+          .div(2)
+          .clipByValue(0, 1);
+        
+        // Adaptive blending based on quantization level
+        const levelWeight = Math.pow(0.8, i); // Exponential decrease in quantization influence
+        
+        const blendedX = quantizedFlows[i].x.mul(transitionWeight.mul(levelWeight))
+          .add(refinedX.mul(tf.sub(1, transitionWeight.mul(levelWeight))));
+        const blendedY = quantizedFlows[i].y.mul(transitionWeight.mul(levelWeight))
+          .add(refinedY.mul(tf.sub(1, transitionWeight.mul(levelWeight))));
+        
+        refinedX = tf.where(magnitudeMask, blendedX, refinedX);
+        refinedY = tf.where(magnitudeMask, blendedY, refinedY);
+      });
+      
+      // Multi-level edge preservation
+      const edgeMask1 = edgeInfo1.edges.expandDims(-1);
+      const edgeMask2 = edgeInfo2.edges.expandDims(-1);
+      const edgeMask3 = edgeInfo3.edges.expandDims(-1);
+      
+      // Weighted edge preservation
+      const detailWeight = edgeMask1.mul(0.5)
+        .add(edgeMask2.mul(0.3))
+        .add(edgeMask3.mul(0.2));
+      
+      // Reshape tensors
+      const refinedXReshaped = refinedX.reshape([h, w, 1]);
+      const refinedYReshaped = refinedY.reshape([h, w, 1]);
+      const flowXReshaped = flowX.reshape([h, w, 1]);
+      const flowYReshaped = flowY.reshape([h, w, 1]);
+      
+      // Adaptive edge-aware blending
+      const edgeBlendX = flowXReshaped.mul(detailWeight)
+        .add(refinedXReshaped.mul(tf.sub(1, detailWeight)));
+      const edgeBlendY = flowYReshaped.mul(detailWeight)
+        .add(refinedYReshaped.mul(tf.sub(1, detailWeight)));
+      
+      // Enhanced smoothing with edge preservation
+      const smoothedX = this.enhancedSmoothing(
+        edgeBlendX.squeeze(-1),
+        edgeMask3.squeeze(-1)
+      );
+      const smoothedY = this.enhancedSmoothing(
+        edgeBlendY.squeeze(-1),
+        edgeMask3.squeeze(-1)
+      );
+      
+      return tf.stack([smoothedY, smoothedX], -1);
+    });
+  };
+
+  // Enhanced smoothing function
+  ns.FlowNetService.prototype.enhancedSmoothing = function(flow, edgeMask) {
+    return tf.tidy(() => {
+      // Gaussian-like kernel for smoother results
+      const kernel = tf.tensor2d([
+        [1, 4, 6, 4, 1],
+        [4, 16, 24, 16, 4],
+        [6, 24, 36, 24, 6],
+        [4, 16, 24, 16, 4],
+        [1, 4, 6, 4, 1]
+      ]).div(256);
+      
+      const flow3D = flow.expandDims(0).expandDims(-1);
+      const kernelExpanded = kernel.expandDims(-1).expandDims(-1);
+      
+      // Apply two-pass smoothing for better results
+      const firstPass = tf.conv2d(
+        flow3D,
+        kernelExpanded,
+        1,
+        'same'
+      ).squeeze([0, -1]);
+      
+      const secondPass = tf.conv2d(
+        firstPass.expandDims(0).expandDims(-1),
+        kernelExpanded,
+        1,
+        'same'
+      ).squeeze([0, -1]);
+      
+      // Adaptive blending between original and smoothed
+      const blendFactor = tf.sub(1, edgeMask).pow(tf.scalar(2));
+      return flow.mul(edgeMask).add(secondPass.mul(blendFactor));
+    });
+  };
+
+  ns.FlowNetService.prototype.visualizeQuantizedFlow = function(flow) {
+    return tf.tidy(() => {
+      // Split flow into components
+      const [flowY, flowX] = tf.split(flow, 2, -1);
+      
+      // Get unique flow values
+      const uniqueX = Array.from(new Set(flowX.dataSync()));
+      const uniqueY = Array.from(new Set(flowY.dataSync()));
+      
+      console.log('Unique flow values:', {
+        x: uniqueX.sort((a, b) => a - b),
+        y: uniqueY.sort((a, b) => a - b)
+      });
+      
+      // Create visualization
+      const magnitude = tf.sqrt(tf.square(flowX).add(tf.square(flowY)));
+      const direction = tf.atan2(flowY, flowX);
+      
+      return {
+        magnitude: magnitude.arraySync(),
+        direction: direction.arraySync(),
+        quantizedValues: {
+          x: uniqueX,
+          y: uniqueY
+        }
+      };
+    });
+  };
+
+  // Main color analysis method
+  ns.FlowNetService.prototype.analyzeColorPalette = function(frame1, frame2) {
+    return tf.tidy(() => {
+      // Extract unique colors from both frames
+      const colors1 = new Set();
+      const colors2 = new Set();
+      
+      // Get pixel data
+      const pixels1 = frame1.getPixels();
+      const pixels2 = frame2.getPixels();
+      
+      // Collect unique non-transparent colors
+      for (let i = 0; i < pixels1.length; i++) {
+        if (pixels1[i] !== 0) { // Skip transparent pixels
+          colors1.add(pixels1[i]);
+        }
+        if (pixels2[i] !== 0) {
+          colors2.add(pixels2[i]);
+        }
+      }
+      
+      // Convert to arrays and sort by frequency
+      const colorMap1 = this.getColorFrequencyMap(pixels1, colors1);
+      const colorMap2 = this.getColorFrequencyMap(pixels2, colors2);
+      
+      return {
+        frame1Colors: Array.from(colors1),
+        frame2Colors: Array.from(colors2),
+        colorMaps: {
+          frame1: colorMap1,
+          frame2: colorMap2
+        },
+        colorMatches: this.matchColors(colorMap1, colorMap2)
+      };
+    });
+  };
+
+  // Helper method to get color frequency map
+  ns.FlowNetService.prototype.getColorFrequencyMap = function(pixels, uniqueColors) {
+    const frequencyMap = new Map();
+    
+    // Initialize frequency map
+    uniqueColors.forEach(color => {
+      frequencyMap.set(color, {
+        count: 0,
+        color: color,
+        r: color & 0xFF,
+        g: (color >> 8) & 0xFF,
+        b: (color >> 16) & 0xFF,
+        a: (color >> 24) & 0xFF
+      });
+    });
+    
+    // Count color frequencies
+    for (let i = 0; i < pixels.length; i++) {
+      const color = pixels[i];
+      if (color !== 0) {
+        const info = frequencyMap.get(color);
+        info.count++;
+      }
+    }
+    
+    return frequencyMap;
+  };
+
+  // Helper method to match colors between frames
+  ns.FlowNetService.prototype.matchColors = function(colorMap1, colorMap2) {
+    const matches = new Map();
+    
+    colorMap1.forEach((info1, color1) => {
+      let bestMatch = null;
+      let minDistance = Infinity;
+      
+      colorMap2.forEach((info2, color2) => {
+        const distance = Math.sqrt(
+          Math.pow(info1.r - info2.r, 2) +
+          Math.pow(info1.g - info2.g, 2) +
+          Math.pow(info1.b - info2.b, 2)
+        );
+        
+        if (distance < minDistance) {
+          minDistance = distance;
+          bestMatch = color2;
+        }
+      });
+      
+      if (bestMatch !== null) {
+        matches.set(color1, bestMatch);
+      }
+    });
+    
+    return matches;
+  };
+
+  // Add test method for color palette analysis
+  ns.FlowNetService.prototype.testColorPaletteAnalysis = function(frame1, frame2) {
+    try {
+      const paletteInfo = this.analyzeColorPalette(frame1, frame2);
+      
+      console.log('Color Palette Analysis Results:', {
+        'Frame 1 Colors': paletteInfo.frame1Colors.map(color => ({
+          hex: '#' + color.toString(16).padStart(8, '0'),
+          info: paletteInfo.colorMaps.frame1.get(color)
+        })),
+        'Frame 2 Colors': paletteInfo.frame2Colors.map(color => ({
+          hex: '#' + color.toString(16).padStart(8, '0'),
+          info: paletteInfo.colorMaps.frame2.get(color)
+        })),
+        'Color Matches': Array.from(paletteInfo.colorMatches).map(([color1, color2]) => ({
+          from: '#' + color1.toString(16).padStart(8, '0'),
+          to: '#' + color2.toString(16).padStart(8, '0'),
+          fromInfo: paletteInfo.colorMaps.frame1.get(color1),
+          toInfo: paletteInfo.colorMaps.frame2.get(color2)
+        }))
+      });
+
+      return true;
+    } catch (error) {
+      console.error('Color palette analysis test failed:', error);
+      return false;
+    }
+  };
+
+  // Update detectConnectedRegions to handle tiny regions better
+  ns.FlowNetService.prototype.detectConnectedRegions = function(frame) {
+    const pixels = frame.getPixels();
+    const width = frame.getWidth();
+    const height = frame.getHeight();
+    const regions = new Map();
+    const visited = new Set();
+
+    // Simplified color similarity check focused on pixel art
+    const areSimilarColors = (color1, color2) => {
+      if (color1 === color2) return true; // Exact match
+      if (color1 === 0 || color2 === 0) return false; // Skip transparent
+
+      const r1 = color1 & 0xFF;
+      const g1 = (color1 >> 8) & 0xFF;
+      const b1 = (color1 >> 16) & 0xFF;
+      
+      const r2 = color2 & 0xFF;
+      const g2 = (color2 >> 8) & 0xFF;
+      const b2 = (color2 >> 16) & 0xFF;
+
+      // Check if colors are in same family
+      const getColorFamily = (r, g, b) => {
+        if (Math.abs(r - g) < 30 && Math.abs(g - b) < 30) return 'gray';
+        const max = Math.max(r, g, b);
+        if (max === r) return 'red';
+        if (max === g) return 'green';
+        return 'blue';
+      };
+
+      // More permissive matching
+      const colorFamily1 = getColorFamily(r1, g1, b1);
+      const colorFamily2 = getColorFamily(r2, g2, b2);
+      
+      if (colorFamily1 === colorFamily2) return true;
+
+      // Check luminance for shading
+      const getLuminance = (r, g, b) => (0.299 * r + 0.587 * g + 0.114 * b);
+      const lum1 = getLuminance(r1, g1, b1);
+      const lum2 = getLuminance(r2, g2, b2);
+      
+      return Math.abs(lum1 - lum2) < 60; // More permissive luminance threshold
+    };
+
+    // Simplified flood fill
+    const floodFill = (startX, startY, baseColor) => {
+      const region = [];
+      const stack = [{x: startX, y: startY}];
+      
+      while (stack.length > 0) {
+        const {x, y} = stack.pop();
+        const pos = y * width + x;
+        
+        if (x < 0 || x >= width || y < 0 || y >= height) continue;
+        if (visited.has(pos)) continue;
+        
+        const currentColor = pixels[pos];
+        if (!areSimilarColors(currentColor, baseColor)) continue;
+        
+        visited.add(pos);
+        region.push({x, y});
+        
+        // Check neighbors (including diagonals)
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            stack.push({x: x + dx, y: y + dy});
+          }
+        }
+      }
+      
+      return {
+        pixels: region,
+        size: region.length,
+        color: baseColor
+      };
+    };
+
+    // First pass: collect all regions
+    const allRegions = [];
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const pos = y * width + x;
+        const color = pixels[pos];
+        
+        if (color === 0 || visited.has(pos)) continue;
+        
+        const region = floodFill(x, y, color);
+        allRegions.push(region);
+      }
+    }
+
+    // Sort regions by size (largest first)
+    allRegions.sort((a, b) => b.size - a.size);
+
+    // Separate tiny and normal regions
+    const tinyRegions = allRegions.filter(r => r.size < 10);
+    const normalRegions = allRegions.filter(r => r.size >= 10);
+
+    // First, create groups from normal regions
+    const mergedRegions = new Map();
+    for (const region of normalRegions) {
+      let merged = false;
+      
+      // Try to merge with existing groups
+      for (const [existingColor, existingRegions] of mergedRegions) {
+        if (this.areSimilarColors(region.color, existingColor)) {
+          existingRegions.push(region);
+          merged = true;
+          break;
+        }
+      }
+      
+      // If no merge, create new group
+      if (!merged) {
+        mergedRegions.set(region.color, [region]);
+      }
+    }
+
+    // Then, merge tiny regions into the closest normal region
+    for (const tinyRegion of tinyRegions) {
+      let bestMatch = null;
+      let minDistance = Infinity;
+      let bestColor = null;
+
+      // Find closest normal region
+      for (const [color, regions] of mergedRegions) {
+        for (const region of regions) {
+          // Calculate distance between region centers
+          const tinyCenter = {
+            x: tinyRegion.pixels.reduce((sum, p) => sum + p.x, 0) / tinyRegion.pixels.length,
+            y: tinyRegion.pixels.reduce((sum, p) => sum + p.y, 0) / tinyRegion.pixels.length
+          };
+          
+          const regionCenter = {
+            x: region.pixels.reduce((sum, p) => sum + p.x, 0) / region.pixels.length,
+            y: region.pixels.reduce((sum, p) => sum + p.y, 0) / region.pixels.length
+          };
+
+          const dist = Math.abs(tinyCenter.x - regionCenter.x) + 
+                      Math.abs(tinyCenter.y - regionCenter.y);
+
+          if (dist < minDistance) {
+            minDistance = dist;
+            bestMatch = region;
+            bestColor = color;
+          }
+        }
+      }
+
+      // Always merge tiny region with its closest neighbor
+      if (bestMatch) {
+        mergedRegions.get(bestColor).push(tinyRegion);
+      } else {
+        // If no normal regions exist, create a new group
+        mergedRegions.set(tinyRegion.color, [tinyRegion]);
+      }
+    }
+
+    return mergedRegions;
+  };
+
+  // Update test method for connected region detection
+  ns.FlowNetService.prototype.testConnectedRegions = function(frame) {
+    try {
+      const regions = this.detectConnectedRegions(frame);
+      
+      // Detailed analysis
+      const analysis = {
+        'Total Region Groups': regions.size,
+        'Detailed Regions': Array.from(regions.entries()).map(([color, regionList]) => {
+          const totalPixels = regionList.reduce((sum, region) => sum + region.pixels.length, 0);
+          return {
+            color: '#' + color.toString(16).padStart(8, '0'),
+            numberOfRegions: regionList.length,
+            totalPixels: totalPixels,
+            largestRegion: regionList.reduce((largest, region) => 
+              region.pixels.length > largest.pixels.length ? region : largest, 
+              regionList[0]
+            ),
+            regions: regionList.map(region => ({
+              size: region.pixels.length,
+              uniqueColors: region.colors.length,
+              bounds: {
+                x: Math.min(...region.pixels.map(p => p.x)),
+                y: Math.min(...region.pixels.map(p => p.y)),
+                width: Math.max(...region.pixels.map(p => p.x)) - Math.min(...region.pixels.map(p => p.x)) + 1,
+                height: Math.max(...region.pixels.map(p => p.y)) - Math.min(...region.pixels.map(p => p.y)) + 1
+              }
+            }))
+          };
+        }).sort((a, b) => b.totalPixels - a.totalPixels)
+      };
+
+      // Additional statistics
+      const statistics = {
+        'Average Region Size': Array.from(regions.values())
+          .flat()
+          .reduce((sum, region) => sum + region.pixels.length, 0) / 
+          Array.from(regions.values()).flat().length,
+        'Total Regions': Array.from(regions.values()).flat().length,
+        'Color Groups': regions.size
+      };
+
+      console.log('Connected Regions Analysis:', analysis);
+      console.log('Region Statistics:', statistics);
+      
+      return true;
+    } catch (error) {
+      console.error('Connected region detection failed:', error);
+      return false;
+    }
+  };
+
+  // Update areSimilarColors to be more balanced
+  ns.FlowNetService.prototype.areSimilarColors = function(color1, color2) {
+    const r1 = color1 & 0xFF;
+    const g1 = (color1 >> 8) & 0xFF;
+    const b1 = (color1 >> 16) & 0xFF;
+    const a1 = (color1 >> 24) & 0xFF;
+    
+    const r2 = color2 & 0xFF;
+    const g2 = (color2 >> 8) & 0xFF;
+    const b2 = (color2 >> 16) & 0xFF;
+    const a2 = (color2 >> 24) & 0xFF;
+    
+    // Skip transparent pixels
+    if (a1 === 0 || a2 === 0) return false;
+    
+    // Exact match
+    if (color1 === color2) return true;
+    
+    // Get luminance
+    const getLuminance = (r, g, b) => (0.299 * r + 0.587 * g + 0.114 * b);
+    const lum1 = getLuminance(r1, g1, b1);
+    const lum2 = getLuminance(r2, g2, b2);
+    
+    // More balanced color matching
+    const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+    const lumDiff = Math.abs(lum1 - lum2) / 255;
+    
+    // Balanced shading check
+    const isShading = (
+      colorDiff < 150 && // More balanced threshold
+      lumDiff < 0.4 &&   // More balanced luminance steps
+      Math.max(
+        Math.abs(r1 - r2),
+        Math.abs(g1 - g2),
+        Math.abs(b1 - b2)
+      ) < 80 // More balanced channel differences
+    );
+    
+    // Get color family
+    const getColorFamily = (r, g, b) => {
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      
+      // Balanced gray detection
+      if (max - min < 40) return 'gray';
+      
+      // Get dominant channel
+      if (r > g + 30 && r > b + 30) return 'red';
+      if (g > r + 30 && g > b + 30) return 'green';
+      if (b > r + 30 && b > g + 30) return 'blue';
+      return 'mixed';
+    };
+    
+    const family1 = getColorFamily(r1, g1, b1);
+    const family2 = getColorFamily(r2, g2, b2);
+    
+    return isShading || family1 === family2;
+  };
+
+  // Update mergeAdjacentRegions to be more balanced
+  ns.FlowNetService.prototype.mergeAdjacentRegions = function(regions) {
+    const merged = new Map();
+    const processed = new Set();
+    
+    // Helper to check if regions are adjacent or close
+    const areClose = (region1, region2) => {
+      // For small regions, use a moderate proximity threshold
+      if (region1.pixels.length < 10 || region2.pixels.length < 10) {
+        const center1 = {
+          x: region1.pixels.reduce((sum, p) => sum + p.x, 0) / region1.pixels.length,
+          y: region1.pixels.reduce((sum, p) => sum + p.y, 0) / region1.pixels.length
+        };
+        
+        const center2 = {
+          x: region2.pixels.reduce((sum, p) => sum + p.x, 0) / region2.pixels.length,
+          y: region2.pixels.reduce((sum, p) => sum + p.y, 0) / region2.pixels.length
+        };
+        
+        const dist = Math.abs(center1.x - center2.x) + Math.abs(center1.y - center2.y);
+        return dist < 8; // More balanced threshold
+      }
+      
+      // For larger regions, check pixel proximity
+      for (const p1 of region1.pixels) {
+        for (const p2 of region2.pixels) {
+          const dx = Math.abs(p1.x - p2.x);
+          const dy = Math.abs(p1.y - p2.y);
+          if (dx <= 2 && dy <= 2) return true;
+        }
+      }
+      return false;
+    };
+    
+    // Convert to array and sort by size
+    const regionsList = Array.from(regions.entries())
+      .sort((a, b) => b[1].reduce((sum, r) => sum + r.pixels.length, 0) - 
+                      a[1].reduce((sum, r) => sum + r.pixels.length, 0));
+    
+    // Process regions, starting with largest
+    for (const [color1, regions1] of regionsList) {
+      if (processed.has(color1)) continue;
+      
+      let mergedGroup = [...regions1];
+      processed.add(color1);
+      
+      // Keep merging until no more matches found
+      let changed = true;
+      while (changed) {
+        changed = false;
+        
+        for (const [color2, regions2] of regionsList) {
+          if (processed.has(color2)) continue;
+          
+          // Check proximity and color similarity
+          const shouldMerge = regions1.some(r1 => 
+            regions2.some(r2 => 
+              areClose(r1, r2) && this.areSimilarColors(color1, color2)
+            )
+          );
+          
+          if (shouldMerge) {
+            mergedGroup = mergedGroup.concat(regions2);
+            processed.add(color2);
+            changed = true;
+          }
+        }
+      }
+      
+      merged.set(color1, mergedGroup);
+    }
+    
+    return merged;
   };
 })(); 

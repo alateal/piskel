@@ -217,6 +217,12 @@
       this.interpolationService.init().catch(error => {
         console.error('Failed to initialize interpolation service:', error);
       });
+
+      // Initialize FlowNetService
+      this.flowNetService = new pskl.service.FlowNetService();
+      this.flowNetService.init().catch(error => {
+        console.error('Failed to initialize FlowNet service:', error);
+      });
     },
 
     loadPiskel_ : function (piskelData) {
