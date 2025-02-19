@@ -217,7 +217,13 @@ module.exports = function(grunt) {
           {src: ['src/logo.png'], dest: 'dest/prod/logo.png'},
           {src: ['src/js/lib/gif/gif.ie.worker.js'], dest: 'dest/prod/js/lib/gif/gif.ie.worker.js'},
           {expand: true, src: ['img/**'], cwd: 'src/', dest: 'dest/prod/', filter: 'isFile'},
-          {expand: true, src: ['css/fonts/**'], cwd: 'src/', dest: 'dest/prod/', filter: 'isFile'}
+          {expand: true, src: ['css/fonts/**'], cwd: 'src/', dest: 'dest/prod/', filter: 'isFile'},
+          {
+            expand: true,
+            src: ['models/**'],
+            dest: 'dest/prod/',
+            filter: 'isFile'
+          }
         ]
       },
       dev: {
@@ -229,6 +235,13 @@ module.exports = function(grunt) {
           {expand: true, src: ['js/**'], cwd: 'src/', dest: 'dest/dev/', filter: 'isFile'},
           {expand: true, src: ['css/**'], cwd: 'src/', dest: 'dest/dev/', filter: 'isFile'},
           {expand: true, src: ['img/**'], cwd: 'src/', dest: 'dest/dev/', filter: 'isFile'},
+          {
+            expand: true,
+            cwd: 'dest/prod/',
+            src: ['models/**'],
+            dest: 'dest/dev/',
+            filter: 'isFile'
+          }
         ]
       }
     },
@@ -266,40 +279,40 @@ module.exports = function(grunt) {
      * DESKTOP BUILDS
      */
 
-    nwjs: {
-      windows : {
-        options: {
-          downloadUrl: 'https://dl.nwjs.io/',
-          version : "0.19.4",
-          build_dir: './dest/desktop/', // destination folder of releases.
-          win: true,
-          linux32: true,
-          linux64: true,
-          flavor: "normal",
-        },
-        src: ['./dest/prod/**/*', "./package.json", "!./dest/desktop/"]
-      },
-      macos : {
-        options: {
-          downloadUrl: 'https://dl.nwjs.io/',
-          osx64: true,
-          version : "0.19.4",
-          build_dir: './dest/desktop/',
-          flavor: "normal",
-        },
-        src: ['./dest/prod/**/*', "./package.json", "!./dest/desktop/"]
-      },
-      macos_old : {
-        options: {
-          downloadUrl: 'https://dl.nwjs.io/',
-          osx64: true,
-          version : "0.12.3",
-          build_dir: './dest/desktop/old',
-          flavor: "normal",
-        },
-        src: ['./dest/prod/**/*', "./package.json", "!./dest/desktop/"]
-      }
-    }
+    // nwjs: {
+    //   windows : {
+    //     options: {
+    //       downloadUrl: 'https://dl.nwjs.io/',
+    //       version : "0.19.4",
+    //       build_dir: './dest/desktop/', // destination folder of releases.
+    //       win: true,
+    //       linux32: true,
+    //       linux64: true,
+    //       flavor: "normal",
+    //     },
+    //     src: ['./dest/prod/**/*', "./package.json", "!./dest/desktop/"]
+    //   },
+    //   macos : {
+    //     options: {
+    //       downloadUrl: 'https://dl.nwjs.io/',
+    //       osx64: true,
+    //       version : "0.19.4",
+    //       build_dir: './dest/desktop/',
+    //       flavor: "normal",
+    //     },
+    //     src: ['./dest/prod/**/*', "./package.json", "!./dest/desktop/"]
+    //   },
+    //   macos_old : {
+    //     options: {
+    //       downloadUrl: 'https://dl.nwjs.io/',
+    //       osx64: true,
+    //       version : "0.12.3",
+    //       build_dir: './dest/desktop/old',
+    //       flavor: "normal",
+    //     },
+    //     src: ['./dest/prod/**/*', "./package.json", "!./dest/desktop/"]
+    //   }
+    // }
   });
 
   // TEST TASKS
@@ -325,9 +338,9 @@ module.exports = function(grunt) {
   grunt.registerTask('merge-statics', ['concat:js', 'concat:css', 'uglify']);
   grunt.registerTask('build',  ['clean:prod', 'sprite', 'merge-statics', 'build-index.html', 'replace:mainPartial', 'replace:css', 'copy:prod']);
   grunt.registerTask('build-dev',  ['clean:dev', 'sprite', 'build-index.html', 'copy:dev']);
-  grunt.registerTask('desktop', ['clean:desktop', 'default', 'nwjs:windows']);
-  grunt.registerTask('desktop-mac', ['clean:desktop', 'default', 'nwjs:macos']);
-  grunt.registerTask('desktop-mac-old', ['clean:desktop', 'default', 'replace:desktop', 'nwjs:macos_old']);
+  // grunt.registerTask('desktop', ['clean:desktop', 'default', 'nwjs:windows']);
+  // grunt.registerTask('desktop-mac', ['clean:desktop', 'default', 'nwjs:macos']);
+  // grunt.registerTask('desktop-mac-old', ['clean:desktop', 'default', 'replace:desktop', 'nwjs:macos_old']);
 
   // SERVER TASKS
   // Start webserver and watch for changes

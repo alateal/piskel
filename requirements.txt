@@ -1,0 +1,11 @@
+# Core dependencies
+tensorflow
+tensorflow-metal
+tensorboard
+keras
+numpy
+protobuf
+
+# Additional dependencies
+tensorflowjs
+h5py

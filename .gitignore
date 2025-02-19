@@ -40,3 +40,12 @@ report
 *.private.*
 
 .env
+
+# Build files
+dest/
+.grunt
+# But keep the models directory
+!dest/prod/models/
+
+# Python virtual environment
+venv/

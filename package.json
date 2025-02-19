@@ -25,9 +25,14 @@
     "start": "nodewebkit",
     "preversion": "grunt test build",
     "postversion": "git push && git push --tags && npm publish",
-    "release": "grunt && node ./bin/copy-to-piskel-website"
+    "release": "grunt && node ./bin/copy-to-piskel-website",
+    "convert-model": "venv/bin/python scripts/convert_flownet.py",
+    "postinstall": "npm run convert-model"
   },
   "devDependencies": {
+    "@tensorflow/tfjs": "^4.11.0",
+    "@tensorflow/tfjs-converter": "^4.11.0",
+    "@tensorflow/tfjs-backend-webgl": "^4.11.0",
     "dateformat": "2.0.0",
     "fs-extra": "3.0.1",
     "grunt": "^1.6.1",

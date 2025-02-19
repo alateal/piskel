@@ -2,34 +2,16 @@
   var ns = $.namespace('pskl.service');
 
   ns.InterpolationService = function () {
+    this.flowNetService = new pskl.service.FlowNetService();
     this.isModelLoaded = false;
   };
 
   ns.InterpolationService.prototype.init = async function () {
     try {
-      // Check for WebGL support
-      if (tf.getBackend() !== 'webgl') {
-        try {
-          // Configure WebGL before setting it as backend
-          tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', -1); // Prevent duplicate kernel registration
-          await tf.setBackend('webgl');
-          console.log('Successfully enabled WebGL backend');
-        } catch (e) {
-          console.warn('WebGL not available, falling back to CPU:', e);
-          await tf.setBackend('cpu');
-        }
-      }
-
-      // Set WebGL flags for better performance
-      if (tf.getBackend() === 'webgl') {
-        tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
-        tf.env().set('WEBGL_PACK', true);
-      }
-
-      console.log('Active backend:', tf.getBackend());
+      await this.flowNetService.init();
       this.isModelLoaded = true;
     } catch (error) {
-      console.error('Failed to initialize interpolation service:', error);
+      console.error('Failed to initialize interpolation:', error);
       throw error;
     }
   };
@@ -99,69 +81,59 @@
 
   ns.InterpolationService.prototype.interpolateFrames = async function (frame1, frame2, numFrames) {
     if (!this.isModelLoaded) {
-      throw new Error('Model not loaded');
+      throw new Error('Service not initialized');
     }
 
+    console.log('Starting frame interpolation:', {
+      frame1: frame1,
+      frame2: frame2,
+      numFrames: numFrames
+    });
+
     const frames = [];
-    const width = frame1.getWidth();
-    const height = frame1.getHeight();
-
-    // Convert both frames to tensors
-    const tensor1 = this.frameToTensor(frame1);
-    const tensor2 = this.frameToTensor(frame2);
-
+    let flow = null;
     try {
+      // Compute optical flow
+      flow = await this.flowNetService.computeFlow(frame1, frame2);
+      console.log('Flow computed:', flow);
+
       // Generate intermediate frames
       for (let i = 1; i <= numFrames; i++) {
         const t = i / (numFrames + 1);
+        console.log('Generating frame', i, 'at t =', t);
         
-        // Use tf.tidy for automatic memory management
-        const newTensor = tf.tidy(() => {
-          // Split alpha and RGB channels
-          const [rgb1, a1] = tf.split(tensor1, [3, 1], -1);
-          const [rgb2, a2] = tf.split(tensor2, [3, 1], -1);
-
-          // Create binary masks for non-zero alpha
-          const mask1 = tf.greater(a1, 0);
-          const mask2 = tf.greater(a2, 0);
-
-          // Interpolate RGB where both pixels are visible
-          const bothVisible = tf.logicalAnd(mask1, mask2);
-          const rgbInterp = tf.where(
-            bothVisible,
-            rgb1.mul(1 - t).add(rgb2.mul(t)),
-            tf.where(mask1, rgb1, rgb2)
-          );
-
-          // Handle alpha with sharp transition at t=0.5
-          const alpha = tf.where(
-            bothVisible,
-            tf.maximum(a1, a2),
-            tf.where(
-              tf.less(t, 0.5),
-              tf.where(mask1, a1, tf.zeros(a1.shape)),
-              tf.where(mask2, a2, tf.zeros(a2.shape))
-            )
-          );
-
-          // Combine channels
-          return tf.concat([rgbInterp, alpha], -1);
-        });
-
-        // Convert interpolated tensor back to frame
-        const newFrame = this.tensorToFrame(newTensor, width, height);
-        frames.push(newFrame);
-
-        // Clean up intermediate tensor
-        newTensor.dispose();
+        // Warp frames using flow
+        const warped1 = await this.flowNetService.warpFrame(frame1, flow, t);
+        const warped2 = await this.flowNetService.warpFrame(frame2, flow, 1 - t);
+        
+        // Blend warped frames
+        const blendedFrame = this.blendFrames(warped1, warped2, t);
+        frames.push(blendedFrame);
       }
+    } catch (error) {
+      console.error('Error during interpolation:', error);
+      throw error;
     } finally {
-      // Clean up input tensors
-      tensor1.dispose();
-      tensor2.dispose();
+      // Cleanup
+      if (flow) flow.dispose();
     }
 
+    console.log('Interpolation complete, generated frames:', frames);
     return frames;
+  };
+
+  ns.InterpolationService.prototype.blendFrames = function(frame1, frame2, t) {
+    return tf.tidy(() => {
+      // Convert frames to tensors
+      const tensor1 = this.flowNetService.preprocessFrame(frame1);
+      const tensor2 = this.flowNetService.preprocessFrame(frame2);
+      
+      // Linear interpolation
+      const blended = tensor1.mul(1 - t).add(tensor2.mul(t));
+      
+      // Convert back to frame
+      return this.flowNetService.postprocessFrame(blended);
+    });
   };
 
   // Add test method to verify frame-tensor conversions

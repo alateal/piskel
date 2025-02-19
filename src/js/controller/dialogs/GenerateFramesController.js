@@ -126,46 +126,64 @@
     this.sliderValue.textContent = event.target.value;
   };
 
-  ns.GenerateFramesController.prototype.onGenerateClick_ = async function () {
-    if (this.startFrame === null || this.endFrame === null) {
-      return;
-    }
-
-    // Show loading state
-    this.generateButton.disabled = true;
-    this.generateButton.textContent = 'Generating...';
-    document.querySelector('.loading-indicator').classList.add('show');
+  ns.GenerateFramesController.prototype.onFrameSelected = function (frame) {
+    // Store selected frame
+    this.selectedFrame = frame;
     
-    try {
-      // Get the selected frames
-      var layer = this.piskelController.getCurrentLayer();
-      var frames = layer.getFrames();
-      var frame1 = frames[this.startFrame];
-      var frame2 = frames[this.endFrame];
-      
-      // Get number of frames to generate
-      var frameCount = parseInt(this.frameCountSlider.value, 10);
-      
-      // Generate intermediate frames
-      var newFrames = await this.interpolationService.interpolateFrames(frame1, frame2, frameCount);
-      
-      // Insert the new frames after the start frame
-      var insertIndex = this.startFrame + 1;
-      newFrames.forEach(function(frame) {
-        layer.addFrameAt(frame, insertIndex++);
-      });
-      
-      // Update the piskel
-      $.publish(Events.PISKEL_RESET);
-      this.closeDialog();
-    } catch (error) {
-      console.error('Frame generation failed:', error);
-      this.showError_('Failed to generate frames. Please try again.');
-    } finally {
-      // Reset states
-      this.generateButton.disabled = false;
-      this.generateButton.textContent = 'Generate';
-      document.querySelector('.loading-indicator').classList.remove('show');
+    // Get next frame in animation
+    const frameIndex = this.piskelController.getCurrentLayer().getFrameIndex(frame);
+    this.nextFrame = this.piskelController.getCurrentLayer().getFrameAt(frameIndex + 1);
+    
+    // Enable generate button only if we have both frames
+    if (this.selectedFrame && this.nextFrame) {
+      this.generateButton.removeAttribute('disabled');
+    }
+  };
+
+  ns.GenerateFramesController.prototype.onGenerateClick_ = function () {
+    const numFrames = parseInt(this.frameCountSlider.value, 10);
+    console.log('Generate clicked, frames to generate:', numFrames);
+    
+    // Get the selected frames
+    var layer = this.piskelController.getCurrentLayer();
+    var frames = layer.getFrames();
+    var frame1 = frames[this.startFrame];
+    var frame2 = frames[this.endFrame];
+    
+    console.log('Selected frames:', {
+      startFrame: this.startFrame,
+      endFrame: this.endFrame,
+      frame1: frame1,
+      frame2: frame2
+    });
+
+    if (frame1 && frame2) {
+      // Show loading state
+      this.generateButton.disabled = true;
+      this.generateButton.textContent = 'Generating...';
+
+      this.interpolationService.interpolateFrames(frame1, frame2, numFrames)
+        .then(frames => {
+          console.log('Frames generated:', frames);
+          // Insert the generated frames after the start frame
+          frames.forEach((frame, i) => {
+            layer.addFrameAt(frame, this.startFrame + 1 + i);
+          });
+          
+          // Update UI without clearing selection
+          $.publish(Events.PISKEL_RESET);
+        })
+        .catch(error => {
+          console.error('Frame generation failed:', error);
+          this.showError_('Failed to generate frames: ' + error.message);
+        })
+        .finally(() => {
+          // Reset button state without clearing selection
+          this.generateButton.disabled = false;
+          this.generateButton.textContent = 'Generate';
+        });
+    } else {
+      this.showError_('Please select two consecutive frames');
     }
   };
 
