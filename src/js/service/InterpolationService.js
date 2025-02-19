@@ -2,17 +2,26 @@
   var ns = $.namespace('pskl.service');
 
   ns.InterpolationService = function () {
+    console.log('InterpolationService constructor called');
     this.flowNetService = new pskl.service.FlowNetService();
     this.isModelLoaded = false;
   };
 
   ns.InterpolationService.prototype.init = async function () {
+    console.log('InterpolationService init started');
     try {
+      if (!this.flowNetService) {
+        this.flowNetService = new pskl.service.FlowNetService();
+      }
       await this.flowNetService.init();
       this.isModelLoaded = true;
+      console.log('InterpolationService initialized successfully');
+      return true;
     } catch (error) {
       console.error('Failed to initialize interpolation:', error);
-      throw error;
+      this.isModelLoaded = false;
+      // Don't throw, just log the error to prevent app initialization failure
+      return false;
     }
   };
 
@@ -26,19 +35,21 @@
       const data = new Float32Array(width * height * 4);
       for (let i = 0; i < pixels.length; i++) {
         const color = pixels[i];
-        // Extract ABGR components (Piskel's format)
-        const a = (color >>> 24) & 0xFF;
-        const b = (color >>> 16) & 0xFF;
-        const g = (color >>> 8) & 0xFF;
-        const r = color & 0xFF;
+        
+        // Extract ABGR components and normalize to 0-1 range
+        const a = ((color >>> 24) & 0xFF) / 255;
+        const b = ((color >>> 16) & 0xFF) / 255;
+        const g = ((color >>> 8) & 0xFF) / 255;
+        const r = (color & 0xFF) / 255;
 
-        // Convert to normalized values
-        data[i * 4] = r / 255;     // R
-        data[i * 4 + 1] = g / 255; // G
-        data[i * 4 + 2] = b / 255; // B
-        data[i * 4 + 3] = a / 255; // A
+        // Store as RGBA
+        data[i * 4] = r;     // R
+        data[i * 4 + 1] = g; // G
+        data[i * 4 + 2] = b; // B
+        data[i * 4 + 3] = a; // A
       }
       
+      // Create tensor with proper shape
       return tf.tensor3d(data, [height, width, 4]);
     });
   };
@@ -48,29 +59,24 @@
     const data = tensor.dataSync();
     const pixels = new Uint32Array(width * height);
     
-    // Create canvas with willReadFrequently flag
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    
     for (let i = 0; i < pixels.length; i++) {
       // Get RGBA values and convert back to 0-255 range
-      const r = Math.round(data[i * 4] * 255);
-      const g = Math.round(data[i * 4 + 1] * 255);
-      const b = Math.round(data[i * 4 + 2] * 255);
-      const a = Math.round(data[i * 4 + 3] * 255);
+      const r = Math.round(Math.max(0, Math.min(255, data[i * 4] * 255)));
+      const g = Math.round(Math.max(0, Math.min(255, data[i * 4 + 1] * 255)));
+      const b = Math.round(Math.max(0, Math.min(255, data[i * 4 + 2] * 255)));
+      const a = Math.round(Math.max(0, Math.min(255, data[i * 4 + 3] * 255)));
 
-      // Only set pixel if it's not fully transparent
+      // Only set pixel if it has some opacity
       if (a > 0) {
         // Combine into ABGR format (Piskel's format)
         pixels[i] = 
-          (a << 24) |  // Alpha in highest byte
-          (b << 16) |  // Blue
-          (g << 8) |   // Green
-          r;           // Red in lowest byte
+          ((a & 0xFF) << 24) |  // Alpha
+          ((b & 0xFF) << 16) |  // Blue
+          ((g & 0xFF) << 8)  |  // Green
+          (r & 0xFF);           // Red
       } else {
-        pixels[i] = 0; // Fully transparent pixel
+        // Fully transparent pixels
+        pixels[i] = 0;
       }
     }
     
@@ -84,9 +90,21 @@
       throw new Error('Service not initialized');
     }
 
+    // Add detailed debug logging
+    const debugFrame = (frame, label) => {
+      const pixels = frame.getPixels();
+      const nonZeroPixel = pixels.find(p => p !== 0) || 0;
+      console.log(`${label} color sample:`, this.debugPixelColor(nonZeroPixel));
+    };
+
+    debugFrame(frame1, 'Frame 1');
+    debugFrame(frame2, 'Frame 2');
+
     console.log('Starting frame interpolation:', {
-      frame1: frame1,
-      frame2: frame2,
+      frame1Width: frame1.getWidth(),
+      frame1Height: frame1.getHeight(),
+      frame2Width: frame2.getWidth(),
+      frame2Height: frame2.getHeight(),
       numFrames: numFrames
     });
 
@@ -95,7 +113,10 @@
     try {
       // Compute optical flow
       flow = await this.flowNetService.computeFlow(frame1, frame2);
-      console.log('Flow computed:', flow);
+      console.log('Flow computed:', {
+        shape: flow.shape,
+        dtype: flow.dtype
+      });
 
       // Generate intermediate frames
       for (let i = 1; i <= numFrames; i++) {
@@ -104,35 +125,38 @@
         
         // Warp frames using flow
         const warped1 = await this.flowNetService.warpFrame(frame1, flow, t);
+        debugFrame(warped1, `Warped frame1 at t=${t}`);
+        
         const warped2 = await this.flowNetService.warpFrame(frame2, flow, 1 - t);
+        debugFrame(warped2, `Warped frame2 at t=${1-t}`);
         
         // Blend warped frames
         const blendedFrame = this.blendFrames(warped1, warped2, t);
+        debugFrame(blendedFrame, `Blended frame at t=${t}`);
+        
         frames.push(blendedFrame);
       }
     } catch (error) {
       console.error('Error during interpolation:', error);
       throw error;
     } finally {
-      // Cleanup
       if (flow) flow.dispose();
     }
 
-    console.log('Interpolation complete, generated frames:', frames);
     return frames;
   };
 
   ns.InterpolationService.prototype.blendFrames = function(frame1, frame2, t) {
     return tf.tidy(() => {
-      // Convert frames to tensors
-      const tensor1 = this.flowNetService.preprocessFrame(frame1);
-      const tensor2 = this.flowNetService.preprocessFrame(frame2);
+      // Convert frames to tensors using our color-aware method
+      const tensor1 = this.frameToTensor(frame1);
+      const tensor2 = this.frameToTensor(frame2);
       
       // Linear interpolation
       const blended = tensor1.mul(1 - t).add(tensor2.mul(t));
       
-      // Convert back to frame
-      return this.flowNetService.postprocessFrame(blended);
+      // Convert back using our color-aware method
+      return this.tensorToFrame(blended, frame1.getWidth(), frame1.getHeight());
     });
   };
 
@@ -206,5 +230,16 @@
 
     // Clean up
     tensor.dispose();
+  };
+
+  // Add this helper method to debug color values
+  ns.InterpolationService.prototype.debugPixelColor = function(pixel) {
+    return {
+      r: pixel & 0xFF,
+      g: (pixel >> 8) & 0xFF,
+      b: (pixel >> 16) & 0xFF,
+      a: (pixel >> 24) & 0xFF,
+      hex: '#' + pixel.toString(16).padStart(8, '0')
+    };
   };
 })(); 

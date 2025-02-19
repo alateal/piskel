@@ -161,19 +161,48 @@
   ns.FlowNetService.prototype.computeFlow = function(frame1, frame2) {
     try {
       return tf.tidy(() => {
-        // 1. Prepare input frames
-        const input = this.prepareFramePair(frame1, frame2);
+        const interpolationService = new pskl.service.InterpolationService();
         
-        // 2. Run model inference to get flow field
-        const flowField = this.model.predict(input);
+        // Convert frames to RGB tensors
+        const tensor1 = interpolationService.frameToTensor(frame1);
+        const tensor2 = interpolationService.frameToTensor(frame2);
         
-        // Get flow dimensions and ensure correct shape
-        // Model outputs (batch, height, width, 2) tensor
-        const flow = flowField.squeeze(); // Remove batch dim, now (height, width, 2)
-        console.log('Flow shape after squeeze:', flow.shape);
+        // Extract RGB channels
+        const rgb1 = tensor1.slice([0, 0, 0], [-1, -1, 3]);
+        const rgb2 = tensor2.slice([0, 0, 0], [-1, -1, 3]);
+
+        // Get original dimensions
+        const [h, w] = rgb1.shape;
+
+        // Resize to 256x256 for model input
+        const resized1 = tf.image.resizeBilinear(rgb1, [256, 256]);
+        const resized2 = tf.image.resizeBilinear(rgb2, [256, 256]);
         
-        // No need to reshape since model outputs correct shape [height, width, 2]
-        return this.postprocessFlow(flow, frame1.getWidth(), frame1.getHeight());
+        // Add batch dimension
+        const batched1 = resized1.expandDims(0);
+        const batched2 = resized2.expandDims(0);
+        
+        // Run model inference
+        const flowField = this.model.predict([batched1, batched2]);
+        const flow = flowField.squeeze();
+        
+        // Resize flow back to original dimensions
+        const resizedFlow = tf.image.resizeBilinear(
+          flow.expandDims(0),
+          [h, w]
+        ).squeeze(0);
+
+        // Scale the flow values to account for the resize
+        const scaleY = h / 256;
+        const scaleX = w / 256;
+        
+        // Scale flow to pixel space with smaller magnitude
+        const scaledFlow = tf.mul(
+          resizedFlow,
+          tf.tensor([scaleY, scaleX]).reshape([1, 1, 2])
+        ).mul(0.5); // Reduce flow magnitude
+        
+        return scaledFlow;
       });
     } catch (error) {
       console.error('Flow computation failed:', error);
@@ -259,74 +288,90 @@
   // Update the warpFrame method to fix transform matrix creation
   ns.FlowNetService.prototype.warpFrame = function(frame, flow, t) {
     return tf.tidy(() => {
-      const tensor = this.preprocessFrame(frame).expandDims(0);
-      const [batchSize, h, w, channels] = tensor.shape;
+      const interpolationService = new pskl.service.InterpolationService();
+      const tensor = interpolationService.frameToTensor(frame);
+      const [h, w, channels] = tensor.shape;
       
       // Ensure flow has correct shape [height, width, 2]
       let processedFlow = flow;
       if (flow.rank !== 3) {
-        processedFlow = flow.reshape([flow.shape[0], flow.shape[1], 2]);
+        processedFlow = flow.reshape([h, w, 2]);
       }
-      
-      // Resize flow to match frame dimensions if they don't match
-      if (processedFlow.shape[0] !== h || processedFlow.shape[1] !== w) {
-        processedFlow = tf.image.resizeBilinear(
-          processedFlow.expandDims(0),
-          [h, w]
-        ).squeeze(0);
-      }
-      
-      // Get flow components
-      const flowY = processedFlow.slice([0, 0, 0], [-1, -1, 1]).squeeze(-1);
-      const flowX = processedFlow.slice([0, 0, 1], [-1, -1, 1]).squeeze(-1);
       
       // Scale flow by time factor
-      const scaledFlowX = flowX.mul(t);
-      const scaledFlowY = flowY.mul(t);
+      const scaledFlow = processedFlow.mul(t);
+      
+      // Get flow components
+      const flowY = scaledFlow.slice([0, 0, 0], [-1, -1, 1]).squeeze(-1);
+      const flowX = scaledFlow.slice([0, 0, 1], [-1, -1, 1]).squeeze(-1);
 
-      // Create sampling grid
-      const gridY = tf.range(0, h).reshape([h, 1]).tile([1, w]);
-      const gridX = tf.range(0, w).reshape([1, w]).tile([h, 1]);
+      // Create sampling grid coordinates
+      const ys = tf.range(0, h);
+      const xs = tf.range(0, w);
       
-      // Apply flow to grid
-      const sampledY = gridY.add(scaledFlowY).clipByValue(0, h - 1);
-      const sampledX = gridX.add(scaledFlowX).clipByValue(0, w - 1);
+      // Create meshgrid
+      const [gridX, gridY] = tf.meshgrid(xs, ys);
       
-      // Create transform matrix for affine transformation
-      const transformArray = new Float32Array([
-        1, 0, 0,  // First row: x scaling, x shearing, x translation
-        0, 1, 0,  // Second row: y shearing, y scaling, y translation
-        0, 0      // Perspective terms (excluding the implicit 1)
-      ]);
-      
-      // Apply flow displacements
-      transformArray[2] = sampledX.mean().dataSync()[0]; // x translation
-      transformArray[5] = sampledY.mean().dataSync()[0]; // y translation
-      
-      // Create transform matrix tensor
-      const transformMatrix = tf.tensor1d(transformArray).reshape([1, 8]);
+      // Add flow to grid coordinates
+      const sampleX = gridX.add(flowX);
+      const sampleY = gridY.add(flowY);
 
-      // Apply transform
-      const warped = tf.image.transform(
-        tensor,
-        transformMatrix,
-        'bilinear'
-      );
-
-      // Create and apply edge mask
-      const mask = tf.buffer([1, h, w, channels]);
-      const padding = 2;
-      for (let i = padding; i < h - padding; i++) {
-        for (let j = padding; j < w - padding; j++) {
+      // Create output tensor
+      const output = tf.buffer([h, w, channels]);
+      
+      // Perform bilinear sampling manually
+      const tensorData = tensor.arraySync();
+      const sampleXData = sampleX.arraySync();
+      const sampleYData = sampleY.arraySync();
+      
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          // Get sample coordinates
+          let sx = sampleXData[y][x];
+          let sy = sampleYData[y][x];
+          
+          // Clamp coordinates
+          sx = Math.max(0, Math.min(w - 1, sx));
+          sy = Math.max(0, Math.min(h - 1, sy));
+          
+          // Get integer and fractional parts
+          const x0 = Math.floor(sx);
+          const y0 = Math.floor(sy);
+          const x1 = Math.min(x0 + 1, w - 1);
+          const y1 = Math.min(y0 + 1, h - 1);
+          
+          const wx = sx - x0;
+          const wy = sy - y0;
+          
+          // Perform bilinear interpolation for each channel
           for (let c = 0; c < channels; c++) {
-            mask.set(1, 0, i, j, c);
+            const v00 = tensorData[y0][x0][c];
+            const v01 = tensorData[y0][x1][c];
+            const v10 = tensorData[y1][x0][c];
+            const v11 = tensorData[y1][x1][c];
+            
+            const value = (1 - wy) * ((1 - wx) * v00 + wx * v01) +
+                         wy * ((1 - wx) * v10 + wx * v11);
+            
+            output.set(value, y, x, c);
           }
         }
       }
       
-      return this.postprocessFrame(
-        warped.mul(tf.tensor(mask.values, mask.shape)).squeeze()
-      );
+      // Create edge mask
+      const mask = tf.buffer([h, w, channels]);
+      const padding = 2;
+      for (let i = padding; i < h - padding; i++) {
+        for (let j = padding; j < w - padding; j++) {
+          for (let c = 0; c < channels; c++) {
+            mask.set(1, i, j, c);
+          }
+        }
+      }
+      
+      // Apply mask and convert back to frame
+      const warpedTensor = output.toTensor().mul(mask.toTensor());
+      return interpolationService.tensorToFrame(warpedTensor, w, h);
     });
   };
 

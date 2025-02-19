@@ -179,12 +179,13 @@
 
   // Services
   "js/service/storage/StorageService.js",
-  "js/service/InterpolationService.js",
-  "js/service/storage/FileDownloadStorageService.js",
   "js/service/storage/IndexedDbStorageService.js",
+  "js/service/storage/FileDownloadStorageService.js",
   "js/service/storage/LocalStorageService.js",
   "js/service/storage/GalleryStorageService.js",
   "js/service/storage/DesktopStorageService.js",
+  "js/service/InterpolationService.js",
+  "js/service/FlowNetService.js",
   "js/service/BackupService.js",
   "js/service/BeforeUnloadService.js",
   "js/service/HistoryService.js",
@@ -214,7 +215,6 @@
   "js/service/MouseStateService.js",
   "js/service/performance/PerformanceReport.js",
   "js/service/performance/PerformanceReportService.js",
-  "js/service/FlowNetService.js",
 
   // Tools
   "js/tools/ToolsHelper.js",

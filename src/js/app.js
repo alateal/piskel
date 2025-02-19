@@ -21,9 +21,14 @@
       // This id is used to keep track of sessions in the BackupService.
       this.sessionId = pskl.utils.Uuid.generate();
 
+      // Initialize core services first
       this.shortcutService = new pskl.service.keyboard.ShortcutService();
       this.shortcutService.init();
 
+      this.penSizeService = new pskl.service.pensize.PenSizeService();
+      this.penSizeService.init();
+
+      // Initialize piskel and controllers
       var size = pskl.UserSettings.get(pskl.UserSettings.DEFAULT_SIZE);
       var fps = Constants.DEFAULT.FPS;
       var descriptor = new pskl.model.piskel.Descriptor('New Piskel', '');
@@ -157,9 +162,6 @@
         this.savedStatusService);
       this.headerController.init();
 
-      this.penSizeService = new pskl.service.pensize.PenSizeService();
-      this.penSizeService.init();
-
       this.penSizeController = new pskl.controller.PenSizeController();
       this.penSizeController.init();
 
@@ -209,6 +211,12 @@
         pskl.app.shortcutService.registerShortcut(pskl.service.keyboard.Shortcuts.DEBUG.RELOAD_STYLES,
           window.reloadStyles);
       }
+
+      // Initialize interpolation service last since it depends on other services
+      this.interpolationService = new pskl.service.InterpolationService();
+      this.interpolationService.init().catch(error => {
+        console.error('Failed to initialize interpolation service:', error);
+      });
     },
 
     loadPiskel_ : function (piskelData) {

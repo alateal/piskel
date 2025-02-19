@@ -8,11 +8,12 @@
    * Service to retrieve and modify the current pen size.
    */
   ns.PenSizeService = function () {
-    this.size = MIN_PENSIZE;
+    this.size = 1;
   };
 
   ns.PenSizeService.prototype.init = function () {
-    this.size = pskl.UserSettings.get(pskl.UserSettings.PEN_SIZE);
+    this.size = pskl.UserSettings.get(pskl.UserSettings.PEN_SIZE) || 1;
+    $.publish(Events.PEN_SIZE_CHANGED);
 
     var shortcuts = pskl.service.keyboard.Shortcuts;
     pskl.app.shortcutService.registerShortcut(shortcuts.MISC.INCREASE_PENSIZE, this.increasePenSize_.bind(this));
