@@ -502,4 +502,20 @@
     $.publish(Events.ZOOM_CHANGED);
   };
 
+  ns.DrawingController.prototype.getCurrentPenSize = function () {
+    // For size 1, always return 1 to ensure single pixel drawing
+    if (pskl.app.penSizeService.getPenSize() === 1) {
+      return 1;
+    }
+    
+    var zoom = this.getZoom();
+    var size = pskl.app.penSizeService.getPenSize();
+    // For other sizes, scale appropriately
+    return Math.max(1, Math.floor(size / zoom));
+  };
+
+  ns.DrawingController.prototype.getZoom = function () {
+    return this.compositeRenderer.getZoom();
+  };
+
 })();

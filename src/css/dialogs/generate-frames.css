@@ -169,4 +169,16 @@
 
 .generate-frames .frame-preview.selected canvas {
   outline: 2px solid gold;
+}
+
+.generate-rife-button {
+  margin: 10px 0;
+  width: 100%;
+  height: 30px;
+  background: #3498db;  /* Different color to distinguish from TensorFlow */
+  color: white;
+}
+
+.generate-rife-button:hover {
+  background: #2980b9;
 } 

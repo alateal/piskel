@@ -27,7 +27,8 @@
     "postversion": "git push && git push --tags && npm publish",
     "release": "grunt && node ./bin/copy-to-piskel-website",
     "convert-model": "venv/bin/python scripts/convert_flownet.py",
-    "postinstall": "npm run convert-model"
+    "postinstall": "npm run convert-model",
+    "start-rife-server": "bash scripts/start-rife-server.sh"
   },
   "devDependencies": {
     "@tensorflow/tfjs": "^4.11.0",

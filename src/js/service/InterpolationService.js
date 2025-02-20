@@ -90,92 +90,233 @@
   };
 
   ns.InterpolationService.prototype.interpolateFrames = async function (frame1, frame2, numFrames) {
-    if (!this.isModelLoaded) {
-      throw new Error('Service not initialized');
-    }
-
     const frames = [];
     try {
-      // Analyze sprite movement and transformation
-      const movement = this.analyzeSpriteDifference(frame1, frame2);
-      
-      // Generate intermediate frames
-      for (let i = 1; i <= numFrames; i++) {
-        const t = i / (numFrames + 1);
-        console.log('Generating frame', i, 'at t =', t);
+      // Test RIFE server connection with proper error handling
+      try {
+        const response = await fetch('http://localhost:8000/health');
+        const data = await response.json();
         
-        // Create new frame
-        const width = frame1.getWidth();
-        const height = frame1.getHeight();
-        const result = new pskl.model.Frame(width, height);
-        const pixels = new Uint32Array(width * height);
-        
-        // Apply easing to make movement more natural
-        const ease = this.easeInOutQuad(t);
-        
-        // Calculate current frame position and scale
-        const currentOffset = {
-          x: Math.round(movement.dx * ease),
-          y: Math.round(movement.dy * ease)
-        };
-        
-        // For each pixel in the output frame
-        for (let y = 0; y < height; y++) {
-          for (let x = 0; x < width; x++) {
-            const pos = y * width + x;
-            
-            // Calculate source positions with movement
-            const x1 = x - currentOffset.x;
-            const y1 = y - currentOffset.y;
-            
-            // Get colors from both frames (with bounds checking)
-            const color1 = (x1 >= 0 && x1 < width && y1 >= 0 && y1 < height) 
-              ? frame1.getPixel(x1, y1) 
-              : 0;
-              
-            const x2 = x - (movement.dx - currentOffset.x);
-            const y2 = y - (movement.dy - currentOffset.y);
-            
-            const color2 = (x2 >= 0 && x2 < width && y2 >= 0 && y2 < height)
-              ? frame2.getPixel(x2, y2)
-              : 0;
-            
-            // Determine pixel color based on movement and timing
-            if (color1 === 0 && color2 === 0) {
-              pixels[pos] = 0;
-              continue;
-            }
-            
-            // Handle transitioning pixels
-            if (color1 === 0) {
-              // Fade in color2
-              const alpha = ((color2 >> 24) & 0xFF) * ease;
-              pixels[pos] = (Math.round(alpha) << 24) | (color2 & 0x00FFFFFF);
-              continue;
-            }
-            
-            if (color2 === 0) {
-              // Fade out color1
-              const alpha = ((color1 >> 24) & 0xFF) * (1 - ease);
-              pixels[pos] = (Math.round(alpha) << 24) | (color1 & 0x00FFFFFF);
-              continue;
-            }
-            
-            // For overlapping areas, use motion-based blending
-            const useColor2 = this.shouldUseColor2(x, y, movement, ease);
-            pixels[pos] = useColor2 ? color2 : color1;
-          }
+        if (response.ok && data.status === 'ok' && data.model_loaded) {
+          console.log('RIFE server available, using RIFE for interpolation');
+          return await this.interpolateWithRIFE(frame1, frame2, numFrames);
+        } else {
+          console.log('RIFE server available but model not loaded:', data);
+          throw new Error('RIFE model not loaded');
         }
-        
-        result.setPixels(pixels);
-        frames.push(result);
+      } catch (error) {
+        console.log('RIFE server not available:', error);
+        return await this.interpolateWithTensorFlow(frame1, frame2, numFrames);
       }
     } catch (error) {
       console.error('Error during interpolation:', error);
       throw error;
     }
+  };
 
+  // Update the interpolateWithRIFE method to focus on animation interpolation
+  ns.InterpolationService.prototype.interpolateWithRIFE = async function (frame1, frame2, numFrames) {
+    try {
+        const frames = [];
+        const timeSteps = this.generateTimeSteps(numFrames);
+        
+        // Process frames while maintaining aspect ratio
+        const {blob1, blob2, originalSize} = await this.processFramesForRIFE(frame1, frame2);
+        
+        // Generate each intermediate frame
+        for (let i = 0; i < timeSteps.length; i++) {
+            const t = timeSteps[i];
+            console.log('Generating frame with RIFE', i + 1, 'at t =', t);
+            
+            // Create form data with the time step
+            const formData = new FormData();
+            formData.append('frame1', blob1, 'frame1.png');
+            formData.append('frame2', blob2, 'frame2.png');
+            formData.append('time_step', t.toString());
+            
+            // Send request to RIFE server
+            const response = await fetch('http://localhost:8000/interpolate', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                throw new Error(`RIFE request failed: ${response.status}`);
+            }
+            
+            // Convert response directly to frame without additional movement
+            const blob = await response.blob();
+            const interpolatedFrame = await this.blobToFrame(blob, originalSize);
+            frames.push(interpolatedFrame);
+        }
+        
+        return frames;
+    } catch (error) {
+        console.error('Error in RIFE interpolation:', error);
+        throw error;
+    }
+  };
+
+  // Add new method to apply movement interpolation
+  ns.InterpolationService.prototype.applyMovementInterpolation = async function(frame, movement, t, originalSize) {
+    // Create a new frame for the result
+    const result = new pskl.model.Frame(originalSize.width, originalSize.height);
+    const pixels = new Uint32Array(originalSize.width * originalSize.height);
+    
+    // Calculate interpolated position
+    const ease = this.easeInOutQuad(t);
+    const currentOffset = {
+        x: Math.round(movement.dx * ease),
+        y: Math.round(movement.dy * ease)
+    };
+    
+    // Get frame pixels
+    const sourcePixels = frame.getPixels();
+    
+    // Apply movement to each pixel
+    for (let y = 0; y < originalSize.height; y++) {
+        for (let x = 0; x < originalSize.width; x++) {
+            const destPos = y * originalSize.width + x;
+            
+            // Calculate source position with offset
+            const srcX = x - currentOffset.x;
+            const srcY = y - currentOffset.y;
+            
+            // Check if source position is within bounds
+            if (srcX >= 0 && srcX < originalSize.width && 
+                srcY >= 0 && srcY < originalSize.height) {
+                const srcPos = srcY * originalSize.width + srcX;
+                pixels[destPos] = sourcePixels[srcPos];
+            } else {
+                pixels[destPos] = 0; // Transparent if out of bounds
+            }
+        }
+    }
+    
+    result.setPixels(pixels);
+    return result;
+  };
+
+  // Update analyzeSpriteDifference to be more accurate
+  ns.InterpolationService.prototype.analyzeSpriteDifference = function(frame1, frame2) {
+    const bounds1 = this.getSpriteBounds(frame1);
+    const bounds2 = this.getSpriteBounds(frame2);
+    
+    // Calculate centers
+    const center1 = {
+        x: (bounds1.minX + bounds1.maxX) / 2,
+        y: (bounds1.minY + bounds1.maxY) / 2
+    };
+    
+    const center2 = {
+        x: (bounds2.minX + bounds2.maxX) / 2,
+        y: (bounds2.minY + bounds2.maxY) / 2
+    };
+    
+    // Calculate movement vector
+    const dx = Math.round(center2.x - center1.x);
+    const dy = Math.round(center2.y - center1.y);
+    
+    console.log('Movement analysis:', {
+        dx, dy,
+        bounds1,
+        bounds2,
+        center1,
+        center2
+    });
+    
+    return {
+        dx,
+        dy,
+        bounds1,
+        bounds2,
+        center1,
+        center2
+    };
+  };
+
+  // Move existing TensorFlow implementation to new method
+  ns.InterpolationService.prototype.interpolateWithTensorFlow = async function (frame1, frame2, numFrames) {
+    const frames = [];
+    
+    // Analyze sprite movement and transformation
+    const movement = this.analyzeSpriteDifference(frame1, frame2);
+    
+    // Generate intermediate frames
+    for (let i = 1; i <= numFrames; i++) {
+      const t = i / (numFrames + 1);
+      console.log('Generating frame with TensorFlow', i, 'at t =', t);
+      
+      // Create new frame
+      const width = frame1.getWidth();
+      const height = frame1.getHeight();
+      const result = new pskl.model.Frame(width, height);
+      const pixels = new Uint32Array(width * height);
+      
+      // Apply easing to make movement more natural
+      const ease = this.easeInOutQuad(t);
+      
+      // Calculate current frame position and scale
+      const currentOffset = {
+        x: Math.round(movement.dx * ease),
+        y: Math.round(movement.dy * ease)
+      };
+      
+      // For each pixel in the output frame
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const pos = y * width + x;
+          
+          // Calculate source positions with movement
+          const x1 = x - currentOffset.x;
+          const y1 = y - currentOffset.y;
+          
+          // Get colors from both frames (with bounds checking)
+          const color1 = (x1 >= 0 && x1 < width && y1 >= 0 && y1 < height) 
+            ? frame1.getPixel(x1, y1) 
+            : 0;
+            
+          const x2 = x - (movement.dx - currentOffset.x);
+          const y2 = y - (movement.dy - currentOffset.y);
+          
+          const color2 = (x2 >= 0 && x2 < width && y2 >= 0 && y2 < height)
+            ? frame2.getPixel(x2, y2)
+            : 0;
+          
+          // Use existing pixel color determination logic
+          pixels[pos] = this.determinePixelColor(color1, color2, ease);
+        }
+      }
+      
+      result.setPixels(pixels);
+      frames.push(result);
+    }
+    
     return frames;
+  };
+
+  // Add helper method for pixel color determination
+  ns.InterpolationService.prototype.determinePixelColor = function(color1, color2, ease) {
+    // Both transparent
+    if (color1 === 0 && color2 === 0) {
+      return 0;
+    }
+    
+    // Handle transitioning pixels
+    if (color1 === 0) {
+      // Fade in color2
+      const alpha = ((color2 >> 24) & 0xFF) * ease;
+      return (Math.round(alpha) << 24) | (color2 & 0x00FFFFFF);
+    }
+    
+    if (color2 === 0) {
+      // Fade out color1
+      const alpha = ((color1 >> 24) & 0xFF) * (1 - ease);
+      return (Math.round(alpha) << 24) | (color1 & 0x00FFFFFF);
+    }
+    
+    // For non-transparent pixels, use the color based on timing
+    return ease > 0.5 ? color2 : color1;
   };
 
   ns.InterpolationService.prototype.blendFrames = function(frame1, frame2, t) {
@@ -640,30 +781,6 @@
     return t * t * (3 - 2 * t);
   };
 
-  // Add helper method to analyze sprite movement and transformation
-  ns.InterpolationService.prototype.analyzeSpriteDifference = function(frame1, frame2) {
-    const bounds1 = this.getSpriteBounds(frame1);
-    const bounds2 = this.getSpriteBounds(frame2);
-    
-    // Calculate centers
-    const center1 = {
-      x: (bounds1.minX + bounds1.maxX) / 2,
-      y: (bounds1.minY + bounds1.maxY) / 2
-    };
-    
-    const center2 = {
-      x: (bounds2.minX + bounds2.maxX) / 2,
-      y: (bounds2.minY + bounds2.maxY) / 2
-    };
-    
-    return {
-      dx: Math.round(center2.x - center1.x),
-      dy: Math.round(center2.y - center1.y),
-      bounds1,
-      bounds2
-    };
-  };
-
   // Add motion-based color selection
   ns.InterpolationService.prototype.shouldUseColor2 = function(x, y, movement, t) {
     // Calculate which direction the sprite is moving
@@ -706,5 +823,465 @@
     }
     
     return { minX, minY, maxX, maxY };
+  };
+
+  // Update frameToBlob to maintain higher resolution
+  ns.InterpolationService.prototype.frameToBlob = async function (frame) {
+    return new Promise((resolve) => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Use original dimensions directly
+        const width = frame.getWidth();
+        const height = frame.getHeight();
+        
+        // Set canvas to power-of-2 size for RIFE
+        const targetSize = 256; // RIFE's expected size
+        canvas.width = targetSize;
+        canvas.height = targetSize;
+        
+        // Disable smoothing
+        ctx.imageSmoothingEnabled = false;
+        
+        // Draw frame directly at original size first
+        const imageData = ctx.createImageData(width, height);
+        const pixels = frame.getPixels();
+        
+        // Direct pixel transfer without intermediate scaling
+        for (let i = 0; i < pixels.length; i++) {
+            const color = pixels[i];
+            const offset = i * 4;
+            
+            if (color) {
+                imageData.data[offset] = color & 0xFF;         // R
+                imageData.data[offset + 1] = (color >> 8) & 0xFF;  // G
+                imageData.data[offset + 2] = (color >> 16) & 0xFF; // B
+                imageData.data[offset + 3] = (color >> 24) & 0xFF; // A
+            }
+        }
+        
+        // Create temporary canvas at original size
+        const tempCanvas = document.createElement('canvas');
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        tempCtx.imageSmoothingEnabled = false;
+        
+        // Put pixels at original size
+        tempCtx.putImageData(imageData, 0, 0);
+        
+        // Center the sprite in the target canvas
+        const scale = Math.min(
+            targetSize / width,
+            targetSize / height
+        );
+        
+        const scaledWidth = Math.round(width * scale);
+        const scaledHeight = Math.round(height * scale);
+        const offsetX = Math.floor((targetSize - scaledWidth) / 2);
+        const offsetY = Math.floor((targetSize - scaledHeight) / 2);
+        
+        // Clear canvas
+        ctx.fillStyle = 'rgb(0,0,0)';
+        ctx.fillRect(0, 0, targetSize, targetSize);
+        
+        // Single scaling operation
+        ctx.drawImage(tempCanvas, 
+            0, 0, width, height,
+            offsetX, offsetY, scaledWidth, scaledHeight
+        );
+        
+        canvas.toBlob(resolve, 'image/png', 1.0);
+    });
+  };
+
+  // Add color palette management for pixel art
+  ns.InterpolationService.prototype.extractColorPalette = function(frame) {
+    const pixels = frame.getPixels();
+    const palette = new Set();
+    
+    for (let i = 0; i < pixels.length; i++) {
+        const color = pixels[i];
+        if (color !== 0) { // Skip transparent pixels
+            palette.add(color);
+        }
+    }
+    
+    return Array.from(palette);
+  };
+
+  // Find closest color in palette
+  ns.InterpolationService.prototype.findClosestColor = function(r, g, b, palette) {
+    let minDistance = Infinity;
+    let closestColor = 0;
+    
+    for (const color of palette) {
+        const pr = color & 0xFF;
+        const pg = (color >> 8) & 0xFF;
+        const pb = (color >> 16) & 0xFF;
+        
+        // Calculate color distance (using simple RGB distance)
+        const distance = Math.pow(r - pr, 2) + Math.pow(g - pg, 2) + Math.pow(b - pb, 2);
+        
+        if (distance < minDistance) {
+            minDistance = distance;
+            closestColor = color;
+        }
+    }
+    
+    return closestColor;
+  };
+
+  // Update dithering to use color palette
+  ns.InterpolationService.prototype.applyFloydSteinbergDithering = function(imageData, palette) {
+    const width = imageData.width;
+    const height = imageData.height;
+    const data = imageData.data;
+    
+    // Create buffer for error diffusion
+    const buffer = new Float32Array(width * height * 3);
+    
+    // Copy image data to buffer
+    for (let i = 0; i < width * height; i++) {
+        const offset = i * 4;
+        const bufferOffset = i * 3;
+        buffer[bufferOffset] = data[offset];
+        buffer[bufferOffset + 1] = data[offset + 1];
+        buffer[bufferOffset + 2] = data[offset + 2];
+    }
+    
+    // Apply dithering with palette
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = y * width + x;
+            const offset = i * 4;
+            const bufferOffset = i * 3;
+            
+            // Skip transparent pixels
+            if (data[offset + 3] < 128) continue;
+            
+            // Get current color
+            const r = Math.max(0, Math.min(255, buffer[bufferOffset]));
+            const g = Math.max(0, Math.min(255, buffer[bufferOffset + 1]));
+            const b = Math.max(0, Math.min(255, buffer[bufferOffset + 2]));
+            
+            // Find closest palette color
+            const newColor = this.findClosestColor(r, g, b, palette);
+            const nr = newColor & 0xFF;
+            const ng = (newColor >> 8) & 0xFF;
+            const nb = (newColor >> 16) & 0xFF;
+            
+            // Set pixel to palette color
+            data[offset] = nr;
+            data[offset + 1] = ng;
+            data[offset + 2] = nb;
+            data[offset + 3] = 255;
+            
+            // Calculate error
+            const errorR = r - nr;
+            const errorG = g - ng;
+            const errorB = b - nb;
+            
+            // Distribute error with reduced coefficients
+            const distribution = [
+                [x + 1, y, 5/16],
+                [x - 1, y + 1, 3/16],
+                [x, y + 1, 5/16],
+                [x + 1, y + 1, 3/16]
+            ];
+            
+            for (const [nx, ny, factor] of distribution) {
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    const ni = ny * width + nx;
+                    const nbOffset = ni * 3;
+                    buffer[nbOffset] += errorR * factor;
+                    buffer[nbOffset + 1] += errorG * factor;
+                    buffer[nbOffset + 2] += errorB * factor;
+                }
+            }
+        }
+    }
+  };
+
+  // Update blobToFrame to use palette-based dithering
+  ns.InterpolationService.prototype.blobToFrame = async function (blob, originalSize, sourcePalette) {
+    try {
+        const img = await createImageBitmap(blob, {
+            resizeQuality: 'pixelated'
+        });
+        
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = originalSize.width;
+        canvas.height = originalSize.height;
+        ctx.imageSmoothingEnabled = false;
+        
+        // Draw sprite
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        
+        // Get image data
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        
+        // Apply dithering with source palette
+        this.applyFloydSteinbergDithering(imageData, sourcePalette);
+        
+        // Put dithered image back
+        ctx.putImageData(imageData, 0, 0);
+        
+        // Convert to frame
+        const pixels = new Uint32Array(canvas.width * canvas.height);
+        const finalImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        
+        for (let i = 0; i < pixels.length; i++) {
+            const offset = i * 4;
+            const r = finalImageData.data[offset];
+            const g = finalImageData.data[offset + 1];
+            const b = finalImageData.data[offset + 2];
+            const a = finalImageData.data[offset + 3];
+            
+            if (a > 128) {
+                pixels[i] = 
+                    (0xFF << 24) |    // Full alpha
+                    (b << 16) |       // Blue
+                    (g << 8)  |       // Green
+                    r;                // Red
+            } else {
+                pixels[i] = 0;
+            }
+        }
+        
+        const frame = new pskl.model.Frame(originalSize.width, originalSize.height);
+        frame.setPixels(pixels);
+        return frame;
+    } catch (error) {
+        console.error('Error converting blob to frame:', error);
+        throw error;
+    }
+  };
+
+  // Add helper method to get sprite bounds from an image
+  ns.InterpolationService.prototype.getImageSpriteBounds = async function(img) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    
+    // Draw image to analyze its pixels
+    ctx.drawImage(img, 0, 0);
+    const imageData = ctx.getImageData(0, 0, img.width, img.height);
+    
+    let minX = img.width;
+    let minY = img.height;
+    let maxX = 0;
+    let maxY = 0;
+    
+    // Find bounds of non-black pixels
+    for (let y = 0; y < img.height; y++) {
+        for (let x = 0; x < img.width; x++) {
+            const offset = (y * img.width + x) * 4;
+            const r = imageData.data[offset];
+            const g = imageData.data[offset + 1];
+            const b = imageData.data[offset + 2];
+            
+            if (r !== 0 || g !== 0 || b !== 0) {
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                maxX = Math.max(maxX, x);
+                maxY = Math.max(maxY, y);
+            }
+        }
+    }
+    
+    return { minX, minY, maxX, maxY };
+  };
+
+  // Add new method for RIFE frame generation
+  ns.InterpolationService.prototype.generateRifeFrame = function (frame1, frame2) {
+    var deferred = Q.defer();
+
+    // Convert frames to image data
+    var image1 = this.frameToImage(frame1);
+    var image2 = this.frameToImage(frame2);
+
+    // Create form data with the images
+    var formData = new FormData();
+    formData.append('frame1', this.dataURItoBlob(image1), 'frame1.png');
+    formData.append('frame2', this.dataURItoBlob(image2), 'frame2.png');
+    formData.append('time_step', '0.5');  // Middle frame
+
+    // Send to RIFE server
+    fetch('http://localhost:8000/interpolate', {
+      method: 'POST',
+      body: formData
+    })
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error('RIFE server error');
+      }
+      return response.blob();
+    })
+    .then(function (blob) {
+      // Convert blob to image
+      return this.blobToImage(blob);
+    }.bind(this))
+    .then(function (image) {
+      // Convert image to frame data
+      var frame = this.imageToFrame(image);
+      deferred.resolve(frame);
+    }.bind(this))
+    .catch(function (error) {
+      console.error('RIFE generation failed:', error);
+      deferred.reject(error);
+    });
+
+    return deferred.promise;
+  };
+
+  // Helper method to convert data URI to Blob
+  ns.InterpolationService.prototype.dataURItoBlob = function (dataURI) {
+    var binary = atob(dataURI.split(',')[1]);
+    var array = [];
+    for (var i = 0; i < binary.length; i++) {
+      array.push(binary.charCodeAt(i));
+    }
+    return new Blob([new Uint8Array(array)], {type: 'image/png'});
+  };
+
+  // Helper method to convert Blob to Image
+  ns.InterpolationService.prototype.blobToImage = function (blob) {
+    var deferred = Q.defer();
+    var img = new Image();
+    img.onload = function () {
+      deferred.resolve(img);
+    };
+    img.src = URL.createObjectURL(blob);
+    return deferred.promise;
+  };
+
+  // Helper method to convert image to frame
+  ns.InterpolationService.prototype.imageToFrame = function (image) {
+    // Implementation of imageToFrame method
+  };
+
+  // Update generateTimeSteps to create more evenly distributed steps
+  ns.InterpolationService.prototype.generateTimeSteps = function(numFrames) {
+    const timeSteps = [];
+    // Generate evenly spaced time steps between 0 and 1
+    for (let i = 1; i <= numFrames; i++) {
+        const t = i / (numFrames + 1);
+        timeSteps.push(t);
+    }
+    console.log('Generated time steps:', timeSteps);
+    return timeSteps;
+  };
+
+  // Update processFramesForRIFE to handle frame preparation
+  ns.InterpolationService.prototype.processFramesForRIFE = async function(frame1, frame2) {
+    // Verify frames have same dimensions
+    if (frame1.getWidth() !== frame2.getWidth() || frame1.getHeight() !== frame2.getHeight()) {
+        throw new Error('Frames must have the same dimensions');
+    }
+
+    // Convert frames to blobs
+    const blob1 = await this.frameToBlob(frame1);
+    const blob2 = await this.frameToBlob(frame2);
+
+    return {
+        blob1,
+        blob2,
+        originalSize: {
+            width: frame1.getWidth(),
+            height: frame1.getHeight()
+        }
+    };
+  };
+
+  ns.InterpolationService.prototype.sendRIFERequest = async function(blob1, blob2, timeStep) {
+    // Create form data
+    const formData = new FormData();
+    formData.append('frame1', blob1, 'frame1.png');
+    formData.append('frame2', blob2, 'frame2.png');
+    formData.append('time_step', timeStep.toString());
+
+    // Call RIFE server
+    const response = await fetch('http://localhost:8000/interpolate', {
+        method: 'POST',
+        body: formData
+    });
+
+    // Log response details for debugging
+    console.log('Response status:', response.status);
+    console.log('Response headers:', {
+        type: response.headers.get('Content-Type'),
+        length: response.headers.get('Content-Length')
+    });
+
+    // Verify we got an image response
+    if (response.ok) {
+        const contentType = response.headers.get('Content-Type');
+        if (!contentType || !contentType.includes('image/png')) {
+            const responseText = await response.text();
+            console.error('Invalid response:', responseText);
+            throw new Error('Server returned invalid content type');
+        }
+    }
+
+    return response;
+  };
+
+  // Add helper method to get neighboring pixel colors
+  ns.InterpolationService.prototype.getNeighborColors = function(data, x, y, width, height) {
+    const neighbors = [];
+    const offsets = [
+        [-1, -1], [0, -1], [1, -1],
+        [-1,  0],          [1,  0],
+        [-1,  1], [0,  1], [1,  1]
+    ];
+    
+    for (const [dx, dy] of offsets) {
+        const nx = x + dx;
+        const ny = y + dy;
+        
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+            const idx = (ny * width + nx) * 4;
+            neighbors.push({
+                r: data[idx],
+                g: data[idx + 1],
+                b: data[idx + 2],
+                a: data[idx + 3]
+            });
+        }
+    }
+    
+    return neighbors;
+  };
+
+  // Add helper method to determine if a pixel should be sharpened
+  ns.InterpolationService.prototype.shouldSharpenPixel = function(neighbors) {
+    if (neighbors.length < 8) return false;
+    
+    // Get center pixel color (current pixel being processed)
+    const center = {
+        r: neighbors[4].r,
+        g: neighbors[4].g,
+        b: neighbors[4].b
+    };
+    
+    // Count how many neighbors are significantly different
+    let differentNeighbors = 0;
+    const threshold = 32; // Color difference threshold
+    
+    for (const neighbor of neighbors) {
+        const dr = Math.abs(center.r - neighbor.r);
+        const dg = Math.abs(center.g - neighbor.g);
+        const db = Math.abs(center.b - neighbor.b);
+        
+        if (dr > threshold || dg > threshold || db > threshold) {
+            differentNeighbors++;
+        }
+    }
+    
+    // If more than 2 neighbors are different, this might be an edge
+    return differentNeighbors > 2;
   };
 })(); 

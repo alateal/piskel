@@ -12,6 +12,12 @@
 
   ns.GenerateFramesController.prototype.init = function () {
     this.superclass.init.call(this);
+
+    // Add RIFE button
+    this.generateRifeButton = document.querySelector('.generate-rife-button');
+    if (this.generateRifeButton) {
+      this.generateRifeButton.addEventListener('click', this.onRifeButtonClick.bind(this));
+    }
   };
 
   /**
@@ -184,6 +190,52 @@
         });
     } else {
       this.showError_('Please select two consecutive frames');
+    }
+  };
+
+  ns.GenerateFramesController.prototype.onRifeButtonClick = async function () {
+    // Get the selected frames
+    var layer = this.piskelController.getCurrentLayer();
+    var frames = layer.getFrames();
+    var frame1 = frames[this.startFrame];
+    var frame2 = frames[this.endFrame];
+    
+    if (!frame1 || !frame2) {
+        this.showError_('Please select two frames first');
+        return;
+    }
+
+    try {
+        // Show loading state
+        this.generateButton.disabled = true;
+        this.generateRifeButton.disabled = true;
+        this.generateRifeButton.textContent = 'Generating...';
+
+        // Get number of frames from slider
+        const numFrames = parseInt(this.frameCountSlider.value, 10);
+        
+        // Use interpolation service to generate frames
+        const generatedFrames = await this.interpolationService.interpolateFrames(frame1, frame2, numFrames);
+        
+        if (!generatedFrames || generatedFrames.length === 0) {
+            throw new Error('No frames were generated');
+        }
+        
+        // Insert the generated frames after the start frame
+        generatedFrames.forEach((frame, i) => {
+            layer.addFrameAt(frame, this.startFrame + 1 + i);
+        });
+        
+        // Update UI
+        $.publish(Events.PISKEL_RESET);
+    } catch (error) {
+        console.error('RIFE frame generation failed:', error);
+        this.showError_('Failed to generate frames: ' + error.message);
+    } finally {
+        // Reset button states
+        this.generateButton.disabled = false;
+        this.generateRifeButton.disabled = false;
+        this.generateRifeButton.textContent = 'Generate with RIFE';
     }
   };
 

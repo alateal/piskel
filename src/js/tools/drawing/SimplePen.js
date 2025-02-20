@@ -36,7 +36,15 @@
   };
 
   ns.SimplePen.prototype.drawUsingPenSize = function(color, col, row, frame, overlay) {
-    var penSize = pskl.app.penSizeService.getPenSize();
+    var penSize = pskl.app.penSizeService.getActualPenSize();
+    
+    // Strict single pixel drawing for size 1
+    if (penSize <= 1) {
+      this.draw(color, col, row, frame, overlay);
+      return;
+    }
+    
+    // For larger sizes, use resizePixel
     var points = pskl.PixelUtils.resizePixel(col, row, penSize);
     points.forEach(function (point) {
       this.draw(color, point[0], point[1], frame, overlay);

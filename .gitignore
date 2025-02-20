@@ -49,3 +49,12 @@ dest/
 
 # Python virtual environment
 venv/
+
+rife-server-venv/
+scripts/start-rife-server.sh
+
+# RIFE model files
+download_models.sh
+src/server/
+verify_model.py
+scripts/download_model.sh

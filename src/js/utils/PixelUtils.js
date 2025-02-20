@@ -64,23 +64,33 @@
     },
 
     /**
-     * Resize the pixel at {col, row} for the provided size. Will return the array of pixels centered
-     * around the original pixel, forming a pixel square of side=size
+     * Convert a single pixel coordinates to an array of pixel coordinates, using the provided size.
+     * If size is 1, it will return an array containing only the input coordinates.
+     * If size is 2, it will return an array of 4 coordinates (the input coordinates + 3 neighbors)
      *
-     * @param  {Number} row  x-coordinate of the original pixel
-     * @param  {Number} col  y-coordinate of the original pixel
-     * @param  {Number} size >= 1 && <= 32
-     * @return {Array}  array of arrays of 2 Numbers (eg. [[0,0], [0,1], [1,0], [1,1]])
+     * @param  {Number} col x coordinate
+     * @param  {Number} row y coordinate
+     * @param  {Number} size >= 1
+     * @return {Array} array of arrays of 2 numbers (eg. [[0,0], [0,1], [1,0], [1,1]])
      */
-    resizePixel : function (col, row, size) {
+    resizePixel: function (col, row, size) {
+      // Ensure size is an integer and handle size 1 strictly
+      size = Math.floor(size);
+      if (size <= 1) {
+        return [[col, row]];
+      }
+      
       var pixels = [];
-
-      for (var j = 0; j < size; j++) {
-        for (var i = 0; i < size; i++) {
-          pixels.push([col - Math.floor(size / 2) + i, row - Math.floor(size / 2) + j]);
+      var offset = Math.floor((size - 1) / 2); // Adjust offset calculation
+      
+      // Generate square of pixels centered on input coordinates
+      for (var x = 0; x < size; x++) {
+        for (var y = 0; y < size; y++) {
+          var newCol = col - offset + x;
+          var newRow = row - offset + y;
+          pixels.push([newCol, newRow]);
         }
       }
-
       return pixels;
     },
 
