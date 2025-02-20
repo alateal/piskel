@@ -96,8 +96,8 @@
 
     const frames = [];
     try {
-      // Analyze sprite movement
-      const movement = this.analyzeSpriteMovement(frame1, frame2);
+      // Analyze sprite movement and transformation
+      const movement = this.analyzeSpriteDifference(frame1, frame2);
       
       // Generate intermediate frames
       for (let i = 1; i <= numFrames; i++) {
@@ -110,48 +110,59 @@
         const result = new pskl.model.Frame(width, height);
         const pixels = new Uint32Array(width * height);
         
-        // Calculate offset for this frame
-        const offsetX = Math.round(movement.dx * t);
-        const offsetY = Math.round(movement.dy * t);
+        // Apply easing to make movement more natural
+        const ease = this.easeInOutQuad(t);
+        
+        // Calculate current frame position and scale
+        const currentOffset = {
+          x: Math.round(movement.dx * ease),
+          y: Math.round(movement.dy * ease)
+        };
         
         // For each pixel in the output frame
         for (let y = 0; y < height; y++) {
           for (let x = 0; x < width; x++) {
             const pos = y * width + x;
             
-            // Get source positions
-            const x1 = x - offsetX;
-            const y1 = y - offsetY;
-            const x2 = x + (movement.dx - offsetX);
-            const y2 = y + (movement.dy - offsetY);
+            // Calculate source positions with movement
+            const x1 = x - currentOffset.x;
+            const y1 = y - currentOffset.y;
             
             // Get colors from both frames (with bounds checking)
             const color1 = (x1 >= 0 && x1 < width && y1 >= 0 && y1 < height) 
               ? frame1.getPixel(x1, y1) 
               : 0;
               
+            const x2 = x - (movement.dx - currentOffset.x);
+            const y2 = y - (movement.dy - currentOffset.y);
+            
             const color2 = (x2 >= 0 && x2 < width && y2 >= 0 && y2 < height)
               ? frame2.getPixel(x2, y2)
               : 0;
             
-            // If both pixels are transparent, keep transparent
+            // Determine pixel color based on movement and timing
             if (color1 === 0 && color2 === 0) {
               pixels[pos] = 0;
               continue;
             }
             
-            // If one color is transparent, use the other
+            // Handle transitioning pixels
             if (color1 === 0) {
-              pixels[pos] = color2;
-              continue;
-            }
-            if (color2 === 0) {
-              pixels[pos] = color1;
+              // Fade in color2
+              const alpha = ((color2 >> 24) & 0xFF) * ease;
+              pixels[pos] = (Math.round(alpha) << 24) | (color2 & 0x00FFFFFF);
               continue;
             }
             
-            // Determine which color to use based on position and timing
-            const useColor2 = t > 0.5;
+            if (color2 === 0) {
+              // Fade out color1
+              const alpha = ((color1 >> 24) & 0xFF) * (1 - ease);
+              pixels[pos] = (Math.round(alpha) << 24) | (color1 & 0x00FFFFFF);
+              continue;
+            }
+            
+            // For overlapping areas, use motion-based blending
+            const useColor2 = this.shouldUseColor2(x, y, movement, ease);
             pixels[pos] = useColor2 ? color2 : color1;
           }
         }
@@ -629,16 +640,12 @@
     return t * t * (3 - 2 * t);
   };
 
-  // Add helper method to analyze sprite movement
-  ns.InterpolationService.prototype.analyzeSpriteMovement = function(frame1, frame2) {
-    const width = frame1.getWidth();
-    const height = frame1.getHeight();
-    
-    // Find sprite bounds in both frames
+  // Add helper method to analyze sprite movement and transformation
+  ns.InterpolationService.prototype.analyzeSpriteDifference = function(frame1, frame2) {
     const bounds1 = this.getSpriteBounds(frame1);
     const bounds2 = this.getSpriteBounds(frame2);
     
-    // Calculate center points
+    // Calculate centers
     const center1 = {
       x: (bounds1.minX + bounds1.maxX) / 2,
       y: (bounds1.minY + bounds1.maxY) / 2
@@ -649,11 +656,32 @@
       y: (bounds2.minY + bounds2.maxY) / 2
     };
     
-    // Calculate movement vector
     return {
       dx: Math.round(center2.x - center1.x),
-      dy: Math.round(center2.y - center1.y)
+      dy: Math.round(center2.y - center1.y),
+      bounds1,
+      bounds2
     };
+  };
+
+  // Add motion-based color selection
+  ns.InterpolationService.prototype.shouldUseColor2 = function(x, y, movement, t) {
+    // Calculate which direction the sprite is moving
+    const movingRight = movement.dx > 0;
+    const movingDown = movement.dy > 0;
+    
+    // For horizontal movement
+    if (Math.abs(movement.dx) > Math.abs(movement.dy)) {
+      return movingRight ? (x >= movement.bounds1.maxX * t) : (x <= movement.bounds2.maxX * (1 - t));
+    }
+    
+    // For vertical movement
+    return movingDown ? (y >= movement.bounds1.maxY * t) : (y <= movement.bounds2.maxY * (1 - t));
+  };
+
+  // Add easing function for smoother transitions
+  ns.InterpolationService.prototype.easeInOutQuad = function(t) {
+    return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
   };
 
   // Add helper method to get sprite bounds
