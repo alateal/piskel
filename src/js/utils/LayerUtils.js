@@ -22,14 +22,19 @@
     },
 
     getFrameHashAt : function (layers, index) {
-      var hashBuffer = [];
-      layers.forEach(function (l) {
-        var frame = l.getFrameAt(index);
-        hashBuffer.push(frame.getHash());
-        hashBuffer.push(l.getOpacity());
-        return frame;
-      });
-      return hashBuffer.join('-');
+      try {
+        return layers
+          .filter(layer => layer && layer.getFrameAt && layer.getFrameAt(index))
+          .map(function (l) {
+            const frame = l.getFrameAt(index);
+            return frame && frame.getHash ? frame.getHash() : '';
+          })
+          .filter(Boolean)
+          .join('|');
+      } catch (error) {
+        console.error('Error getting frame hash:', error);
+        return '';
+      }
     },
 
     /**
@@ -59,12 +64,43 @@
     },
 
     mergeOpaqueFrameAt_ : function (layers, index) {
-      var hash = pskl.utils.LayerUtils.getFrameHashAt(layers, index);
-      var frames = layers.map(function(l) {return l.getFrameAt(index);});
-      var mergedFrame = pskl.utils.FrameUtils.merge(frames);
-      mergedFrame.id = hash;
-      mergedFrame.version = 0;
-      return mergedFrame;
+      try {
+        // Get frames that exist at this index
+        const validFrames = layers.filter(layer => {
+          return layer && layer.getFrameAt && layer.getFrameAt(index);
+        });
+
+        if (validFrames.length === 0) {
+          console.warn('No valid frames found at index:', index);
+          return null;
+        }
+
+        // Calculate hash only from valid frames
+        var hash = validFrames.map(layer => {
+          const frame = layer.getFrameAt(index);
+          return frame && frame.getHash ? frame.getHash() : '';
+        }).join('|');
+
+        // Get frames array only from valid frames
+        var frames = validFrames.map(function(l) {
+          return l.getFrameAt(index);
+        }).filter(Boolean);
+
+        if (frames.length === 0) {
+          console.warn('No frames to merge at index:', index);
+          return null;
+        }
+
+        var mergedFrame = pskl.utils.FrameUtils.merge(frames);
+        if (mergedFrame) {
+          mergedFrame.id = hash;
+          mergedFrame.version = 0;
+        }
+        return mergedFrame;
+      } catch (error) {
+        console.error('Error in mergeOpaqueFrameAt_:', error);
+        return null;
+      }
     },
 
     renderFrameAt : function (layer, index, preserveOpacity) {

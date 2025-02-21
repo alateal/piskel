@@ -157,39 +157,44 @@
     var frame2 = frames[this.endFrame];
     
     console.log('Selected frames:', {
-      startFrame: this.startFrame,
-      endFrame: this.endFrame,
-      frame1: frame1,
-      frame2: frame2
+        startFrame: this.startFrame,
+        endFrame: this.endFrame,
+        frame1: frame1,
+        frame2: frame2
     });
 
     if (frame1 && frame2) {
-      // Show loading state
-      this.generateButton.disabled = true;
-      this.generateButton.textContent = 'Generating...';
+        // Show loading state
+        this.generateButton.disabled = true;
+        this.generateButton.textContent = 'Generating...';
 
-      this.interpolationService.interpolateFrames(frame1, frame2, numFrames)
-        .then(frames => {
-          console.log('Frames generated:', frames);
-          // Insert the generated frames after the start frame
-          frames.forEach((frame, i) => {
-            layer.addFrameAt(frame, this.startFrame + 1 + i);
-          });
-          
-          // Update UI without clearing selection
-          $.publish(Events.PISKEL_RESET);
-        })
-        .catch(error => {
-          console.error('Frame generation failed:', error);
-          this.showError_('Failed to generate frames: ' + error.message);
-        })
-        .finally(() => {
-          // Reset button state without clearing selection
-          this.generateButton.disabled = false;
-          this.generateButton.textContent = 'Generate';
-        });
+        this.interpolationService.interpolateFrames(frame1, frame2, numFrames)
+            .then(result => {
+                console.log('Frames generated:', result);
+                // Handle both array and single frame results
+                const framesToAdd = Array.isArray(result) ? result : [result];
+                
+                // Insert the generated frames after the start frame
+                framesToAdd.forEach((frame, i) => {
+                    if (frame) { // Add null check
+                        layer.addFrameAt(frame, this.startFrame + 1 + i);
+                    }
+                });
+                
+                // Update UI without clearing selection
+                $.publish(Events.PISKEL_RESET);
+            })
+            .catch(error => {
+                console.error('Frame generation failed:', error);
+                this.showError_(`Failed to generate frames: ${error.message}`);
+            })
+            .finally(() => {
+                // Reset button state without clearing selection
+                this.generateButton.disabled = false;
+                this.generateButton.textContent = 'Generate';
+            });
     } else {
-      this.showError_('Please select two consecutive frames');
+        this.showError_('Please select two consecutive frames');
     }
   };
 
@@ -214,23 +219,66 @@
         // Get number of frames from slider
         const numFrames = parseInt(this.frameCountSlider.value, 10);
         
-        // Use interpolation service to generate frames
-        const generatedFrames = await this.interpolationService.interpolateFrames(frame1, frame2, numFrames);
+        // Process frames for RIFE
+        const processedFrames = await this.interpolationService.processFramesForRIFE(frame1, frame2);
         
-        if (!generatedFrames || generatedFrames.length === 0) {
+        // Generate time steps
+        const timeSteps = this.interpolationService.generateTimeSteps(numFrames);
+        
+        // Generate frames for each time step
+        const generatedFrames = [];
+        for (const timeStep of timeSteps) {
+            try {
+                // Send request to RIFE server
+                const response = await this.interpolationService.sendRIFERequest(
+                    processedFrames.blob1,
+                    processedFrames.blob2,
+                    timeStep
+                );
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('RIFE server error:', {
+                        status: response.status,
+                        statusText: response.statusText,
+                        error: errorText
+                    });
+                    throw new Error(`Server error (${response.status}): ${errorText}`);
+                }
+
+                // Convert response to frame
+                const blob = await response.blob();
+                const frame = await this.interpolationService.blobToFrame(
+                    blob,
+                    processedFrames.originalSize,
+                    this.interpolationService.extractColorPalette(frame1)
+                );
+                
+                if (frame) { // Add null check
+                    generatedFrames.push(frame);
+                }
+            } catch (error) {
+                console.error('Error generating frame:', error);
+                throw new Error(`Frame generation failed: ${error.message}`);
+            }
+        }
+
+        // Only proceed if we have generated frames
+        if (generatedFrames.length > 0) {
+            // Insert the generated frames after the start frame
+            generatedFrames.forEach((frame, i) => {
+                layer.addFrameAt(frame, this.startFrame + 1 + i);
+            });
+            
+            // Update UI
+            $.publish(Events.PISKEL_RESET);
+        } else {
             throw new Error('No frames were generated');
         }
         
-        // Insert the generated frames after the start frame
-        generatedFrames.forEach((frame, i) => {
-            layer.addFrameAt(frame, this.startFrame + 1 + i);
-        });
-        
-        // Update UI
-        $.publish(Events.PISKEL_RESET);
     } catch (error) {
         console.error('RIFE frame generation failed:', error);
-        this.showError_('Failed to generate frames: ' + error.message);
+        this.showError_(`Failed to generate frames: ${error.message}`);
     } finally {
         // Reset button states
         this.generateButton.disabled = false;

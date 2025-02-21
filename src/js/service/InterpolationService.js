@@ -99,7 +99,7 @@
         
         if (response.ok && data.status === 'ok' && data.model_loaded) {
           console.log('RIFE server available, using RIFE for interpolation');
-          return await this.interpolateWithRIFE(frame1, frame2, numFrames);
+          return await this.interpolateWithRIFE(frame1, frame2);
         } else {
           console.log('RIFE server available but model not loaded:', data);
           throw new Error('RIFE model not loaded');
@@ -114,46 +114,55 @@
     }
   };
 
-  // Update the interpolateWithRIFE method to focus on animation interpolation
-  ns.InterpolationService.prototype.interpolateWithRIFE = async function (frame1, frame2, numFrames) {
+  // Update the interpolateWithRIFE method with better error handling
+  ns.InterpolationService.prototype.interpolateWithRIFE = async function (frame1, frame2) {
     try {
-        const frames = [];
-        const timeSteps = this.generateTimeSteps(numFrames);
-        
-        // Process frames while maintaining aspect ratio
-        const {blob1, blob2, originalSize} = await this.processFramesForRIFE(frame1, frame2);
-        
-        // Generate each intermediate frame
-        for (let i = 0; i < timeSteps.length; i++) {
-            const t = timeSteps[i];
-            console.log('Generating frame with RIFE', i + 1, 'at t =', t);
-            
-            // Create form data with the time step
-            const formData = new FormData();
-            formData.append('frame1', blob1, 'frame1.png');
-            formData.append('frame2', blob2, 'frame2.png');
-            formData.append('time_step', t.toString());
-            
-            // Send request to RIFE server
-            const response = await fetch('http://localhost:8000/interpolate', {
-                method: 'POST',
-                body: formData
-            });
-            
-            if (!response.ok) {
-                throw new Error(`RIFE request failed: ${response.status}`);
-            }
-            
-            // Convert response directly to frame without additional movement
-            const blob = await response.blob();
-            const interpolatedFrame = await this.blobToFrame(blob, originalSize);
-            frames.push(interpolatedFrame);
-        }
-        
-        return frames;
+      // Extract color palette from source frames
+      const frame1Palette = this.extractColorPalette(frame1);
+      const frame2Palette = this.extractColorPalette(frame2);
+      // Combine palettes
+      const combinedPalette = [...new Set([...frame1Palette, ...frame2Palette])];
+
+      // Convert frames to blobs
+      const blob1 = await this.frameToBlob(frame1);
+      const blob2 = await this.frameToBlob(frame2);
+
+      // Create form data
+      const formData = new FormData();
+      formData.append('frame1', blob1);
+      formData.append('frame2', blob2);
+      formData.append('time_step', '0.5');
+
+      console.log('Sending request to RIFE server...');
+      
+      // Send request to RIFE server (updated port to 8000)
+      const response = await fetch('http://localhost:8000/interpolate', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('RIFE server response:', {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers),
+          error: errorText
+        });
+        throw new Error(`RIFE server error: ${response.statusText} (${errorText})`);
+      }
+
+      const blob = await response.blob();
+      
+      // Convert response blob back to frame with original size and palette
+      return await this.blobToFrame(blob, {
+        width: frame1.getWidth(),
+        height: frame1.getHeight()
+      }, combinedPalette);
+
     } catch (error) {
-        console.error('Error in RIFE interpolation:', error);
-        throw error;
+      console.error('Error in RIFE interpolation:', error);
+      throw error;
     }
   };
 
@@ -912,21 +921,26 @@
 
   // Find closest color in palette
   ns.InterpolationService.prototype.findClosestColor = function(r, g, b, palette) {
+    if (!Array.isArray(palette) || palette.length === 0) {
+      // Return black if no palette is provided
+      return 0xFF000000;
+    }
+
     let minDistance = Infinity;
-    let closestColor = 0;
+    let closestColor = palette[0];
     
     for (const color of palette) {
-        const pr = color & 0xFF;
-        const pg = (color >> 8) & 0xFF;
-        const pb = (color >> 16) & 0xFF;
-        
-        // Calculate color distance (using simple RGB distance)
-        const distance = Math.pow(r - pr, 2) + Math.pow(g - pg, 2) + Math.pow(b - pb, 2);
-        
-        if (distance < minDistance) {
-            minDistance = distance;
-            closestColor = color;
-        }
+      const pr = color & 0xFF;
+      const pg = (color >> 8) & 0xFF;
+      const pb = (color >> 16) & 0xFF;
+      
+      // Calculate color distance (using simple RGB distance)
+      const distance = Math.pow(r - pr, 2) + Math.pow(g - pg, 2) + Math.pow(b - pb, 2);
+      
+      if (distance < minDistance) {
+        minDistance = distance;
+        closestColor = color;
+      }
     }
     
     return closestColor;
@@ -1022,8 +1036,10 @@
         // Get image data
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         
-        // Apply dithering with source palette
-        this.applyFloydSteinbergDithering(imageData, sourcePalette);
+        // Apply dithering with source palette if available
+        if (Array.isArray(sourcePalette) && sourcePalette.length > 0) {
+          this.applyFloydSteinbergDithering(imageData, sourcePalette);
+        }
         
         // Put dithered image back
         ctx.putImageData(imageData, 0, 0);
@@ -1203,28 +1219,22 @@
     formData.append('frame2', blob2, 'frame2.png');
     formData.append('time_step', timeStep.toString());
 
-    // Call RIFE server
+    // Call RIFE server with CORS headers
     const response = await fetch('http://localhost:8000/interpolate', {
         method: 'POST',
-        body: formData
+        body: formData,
+        mode: 'cors', // Enable CORS
+        headers: {
+            'Accept': 'image/png'
+        }
     });
 
     // Log response details for debugging
-    console.log('Response status:', response.status);
-    console.log('Response headers:', {
-        type: response.headers.get('Content-Type'),
-        length: response.headers.get('Content-Length')
+    console.log('RIFE server response:', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers)
     });
-
-    // Verify we got an image response
-    if (response.ok) {
-        const contentType = response.headers.get('Content-Type');
-        if (!contentType || !contentType.includes('image/png')) {
-            const responseText = await response.text();
-            console.error('Invalid response:', responseText);
-            throw new Error('Server returned invalid content type');
-        }
-    }
 
     return response;
   };
