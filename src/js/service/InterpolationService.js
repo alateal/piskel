@@ -514,23 +514,49 @@
   };
 
   // Add helper method to detect edge pixels
-  ns.InterpolationService.prototype.isEdgePixel = function(x, y, pixels, width, height) {
-    const centerColor = pixels[y * width + x];
+  ns.InterpolationService.prototype.isEdgePixel = function(data, x, y, width, height) {
+    const idx = (y * width + x) * 4;
     
-    // Check 4 adjacent pixels
-    const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    // Check immediate neighbors (4-connected)
+    const neighbors = [
+        [0, -1], // top
+        [-1, 0], // left
+        [1, 0],  // right
+        [0, 1]   // bottom
+    ];
     
-    for (const [dx, dy] of directions) {
+    // Get center pixel values
+    const centerR = data[idx];
+    const centerG = data[idx + 1];
+    const centerB = data[idx + 2];
+    const centerA = data[idx + 3];
+    
+    if (centerA < 128) return false;
+    
+    for (const [dx, dy] of neighbors) {
       const nx = x + dx;
       const ny = y + dy;
       
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-        const neighborColor = pixels[ny * width + nx];
+        // Check bounds
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+            return true; // Consider pixels at image boundaries as edges
+        }
         
-        // If neighbor is transparent or very different color, this is an edge
-        if (neighborColor === 0 || !this.areColorsSimilar(centerColor, neighborColor)) {
+        const nidx = (ny * width + nx) * 4;
+        const neighborA = data[nidx + 3];
+        
+        // If neighbor is transparent, this is an edge
+        if (neighborA < 128) {
           return true;
         }
+        
+        // Check for significant color difference
+        const dr = Math.abs(centerR - data[nidx]);
+        const dg = Math.abs(centerG - data[nidx + 1]);
+        const db = Math.abs(centerB - data[nidx + 2]);
+        
+        if (dr > 30 || dg > 30 || db > 30) {
+            return true;
       }
     }
     
@@ -1017,169 +1043,1256 @@
     }
   };
 
-  // Update blobToFrame to use palette-based dithering
-  ns.InterpolationService.prototype.blobToFrame = async function (blob, originalSize, sourcePalette) {
-    try {
-        const img = await createImageBitmap(blob, {
-            resizeQuality: 'pixelated'
-        });
+  // Update processFramesForRIFE to handle RGB and alpha separately
+  ns.InterpolationService.prototype.processFramesForRIFE = async function(frame1, frame2) {
+    // Verify frames have same dimensions
+    if (frame1.getWidth() !== frame2.getWidth() || frame1.getHeight() !== frame2.getHeight()) {
+        throw new Error('Frames must have the same dimensions');
+    }
+
+    // Extract alpha masks first
+    const alphaMask1 = this.extractAlphaMask(frame1);
+    const alphaMask2 = this.extractAlphaMask(frame2);
+
+    // Create RGB-only versions (set alpha to 255 for non-transparent pixels)
+    const rgbBlob1 = await this.frameToRGBOnlyBlob(frame1);
+    const rgbBlob2 = await this.frameToRGBOnlyBlob(frame2);
+
+    return {
+        blob1: rgbBlob1,
+        blob2: rgbBlob2,
+        alphaMask1,
+        alphaMask2,
+        frame1,
+        frame2,
+        originalSize: {
+            width: frame1.getWidth(),
+            height: frame1.getHeight()
+        }
+    };
+};
+
+  // Add method to convert frame to RGB-only blob
+  ns.InterpolationService.prototype.frameToRGBOnlyBlob = async function(frame) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    
+    canvas.width = frame.getWidth();
+    canvas.height = frame.getHeight();
+    
+    const imageData = ctx.createImageData(canvas.width, canvas.height);
+    const pixels = frame.getPixels();
+    
+    // Copy pixels, setting alpha to 255 for non-transparent pixels
+    for (let i = 0; i < pixels.length; i++) {
+        const pixel = pixels[i];
+        const offset = i * 4;
+        const alpha = (pixel >>> 24) & 0xFF;
         
+        if (alpha > 128) {
+            // Copy RGB values
+            imageData.data[offset] = pixel & 0xFF;         // R
+            imageData.data[offset + 1] = (pixel >> 8) & 0xFF;  // G
+            imageData.data[offset + 2] = (pixel >> 16) & 0xFF; // B
+            imageData.data[offset + 3] = 255;  // Set alpha to fully opaque
+        } else {
+            // For transparent pixels, set to black with full alpha
+            imageData.data[offset] = 0;
+            imageData.data[offset + 1] = 0;
+            imageData.data[offset + 2] = 0;
+            imageData.data[offset + 3] = 255;
+        }
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
+    
+    // Create upscaled canvas with nearest-neighbor
+    const upscaledCanvas = document.createElement('canvas');
+    const upCtx = upscaledCanvas.getContext('2d', { 
+        willReadFrequently: true,
+        imageSmoothingEnabled: false
+    });
+    
+    const scale = Math.max(256 / canvas.width, 256 / canvas.height);
+    upscaledCanvas.width = Math.round(canvas.width * scale);
+    upscaledCanvas.height = Math.round(canvas.height * scale);
+    
+    // Force nearest-neighbor scaling
+    upCtx.imageSmoothingEnabled = false;
+    upCtx.webkitImageSmoothingEnabled = false;
+    upCtx.mozImageSmoothingEnabled = false;
+    upCtx.msImageSmoothingEnabled = false;
+    
+    upCtx.drawImage(canvas, 0, 0, upscaledCanvas.width, upscaledCanvas.height);
+    
+    return new Promise(resolve => {
+        upscaledCanvas.toBlob(resolve, 'image/png', 1.0);
+    });
+};
+
+  // Update blobToFrame to handle transparency better
+  ns.InterpolationService.prototype.blobToFrame = async function(blob, originalSize, sourcePalette) {
+    try {
+      const img = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = originalSize.width;
+      canvas.height = originalSize.height;
+      
+      // Disable smoothing for pixel art
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      const outputPixels = new Uint32Array(canvas.width * canvas.height);
+
+      // Process each pixel
+      for (let i = 0; i < outputPixels.length; i++) {
+        const offset = i * 4;
+        
+        // Get RGBA values
+        const r = data[offset];
+        const g = data[offset + 1];
+        const b = data[offset + 2];
+        const a = data[offset + 3];
+
+        // Skip fully transparent pixels
+        if (a < 128) {
+          outputPixels[i] = 0;
+          continue;
+        }
+
+        // Find closest palette color if palette is provided
+        let finalColor;
+        if (sourcePalette && sourcePalette.length > 0) {
+          finalColor = this.findClosestColor(r, g, b, sourcePalette);
+        } else {
+          finalColor = (b << 16) | (g << 8) | r;
+        }
+
+        // Combine with alpha
+        outputPixels[i] = (a << 24) | finalColor;
+      }
+
+      // Create new frame with processed pixels
+      const newFrame = new pskl.model.Frame(originalSize.width, originalSize.height);
+      newFrame.setPixels(outputPixels);
+      return newFrame;
+
+    } catch (error) {
+      console.error('Error converting blob to frame:', error);
+      throw error;
+    }
+  };
+
+  // Add method to get influences from surrounding tiles
+  ns.InterpolationService.prototype.getTileInfluences = function(x, y, tileMotions, tileSize) {
+    const influences = [];
+    const radius = 2; // Consider 2 tiles in each direction
+
+    for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+            const tileX = Math.floor((x + dx * tileSize) / tileSize);
+            const tileY = Math.floor((y + dy * tileSize) / tileSize);
+            const tileId = `${tileX}_${tileY}`;
+            
+            const motion = tileMotions[tileId];
+            if (motion) {
+                // Calculate distance-based weight
+                const centerX = motion.x + tileSize / 2;
+                const centerY = motion.y + tileSize / 2;
+                const distance = Math.sqrt(
+                    Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2)
+                );
+                const weight = Math.max(0, 1 - distance / (tileSize * 2));
+
+                influences.push({
+                    motion,
+                    weight: weight * motion.confidence
+                });
+            }
+        }
+    }
+
+    return influences;
+  };
+
+  // Add method to calculate weighted offset
+  ns.InterpolationService.prototype.calculateWeightedOffset = function(influences, timeStep) {
+    if (influences.length === 0) {
+        return { x: 0, y: 0 };
+    }
+
+    let totalWeight = 0;
+    let weightedX = 0;
+    let weightedY = 0;
+
+    influences.forEach(({ motion, weight }) => {
+        weightedX += motion.dx * weight;
+        weightedY += motion.dy * weight;
+        totalWeight += weight;
+    });
+
+    return {
+        x: Math.round((weightedX / totalWeight) * timeStep),
+        y: Math.round((weightedY / totalWeight) * timeStep)
+    };
+  };
+
+  // Add anti-banding color sampling
+  ns.InterpolationService.prototype.getSourceColorsWithAntiband = function(x, y, offset, pixels1, pixels2, width, height) {
+    const samples = [];
+    const sampleOffsets = [
+        [0, 0], [0.25, 0.25], [-0.25, 0.25],
+        [0.25, -0.25], [-0.25, -0.25]
+    ];
+
+    for (const [dx, dy] of sampleOffsets) {
+        const sx = x - offset.x + dx;
+        const sy = y - offset.y + dy;
+        
+        if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+            const i = Math.floor(sy) * width + Math.floor(sx);
+            samples.push(pixels1[i]);
+        }
+    }
+
+    // Get average color from samples
+    const color1 = this.averageColors(samples);
+    const color2 = pixels2[y * width + x];
+
+    return {
+        color1,
+        color2,
+        alpha1: (color1 >>> 24) & 0xFF,
+        alpha2: (color2 >>> 24) & 0xFF,
+        x: x,  // Add coordinates
+        y: y,
+        dx: offset.x,  // Add offset information
+        dy: offset.y
+    };
+  };
+
+  // Add color averaging helper
+  ns.InterpolationService.prototype.averageColors = function(colors) {
+    if (colors.length === 0) return 0;
+
+    let r = 0, g = 0, b = 0, a = 0;
+    colors.forEach(color => {
+        r += color & 0xFF;
+        g += (color >> 8) & 0xFF;
+        b += (color >> 16) & 0xFF;
+        a += (color >>> 24) & 0xFF;
+    });
+
+    return (Math.round(a / colors.length) << 24) |
+           (Math.round(b / colors.length) << 16) |
+           (Math.round(g / colors.length) << 8) |
+           Math.round(r / colors.length);
+  };
+
+  // Update sprite movement calculation with segment handling
+  ns.InterpolationService.prototype.calculateSpriteMovement = function(frame1, frame2) {
+    const width = frame1.getWidth();
+    const height = frame1.getHeight();
+    const pixels1 = frame1.getPixels();
+    const pixels2 = frame2.getPixels();
+
+    // Segment the sprite into regions (head, body, limbs)
+    const segments1 = this.segmentSprite(pixels1, width, height);
+    const segments2 = this.segmentSprite(pixels2, width, height);
+
+    // Calculate movement for each segment
+    const movements = {};
+    for (const segmentName in segments1) {
+        const segment1 = segments1[segmentName];
+        const segment2 = segments2[segmentName];
+
+        if (segment1 && segment2) {
+            movements[segmentName] = {
+                dx: segment2.center.x - segment1.center.x,
+                dy: segment2.center.y - segment1.center.y,
+                bounds1: segment1.bounds,
+                bounds2: segment2.bounds
+            };
+        }
+    }
+
+    return movements;
+  };
+
+  // Add sprite segmentation
+  ns.InterpolationService.prototype.segmentSprite = function(pixels, width, height) {
+    const segmentMap = new Uint8Array(width * height);
+    const visited = new Set();
+
+    // Adjusted color ranges for better segment detection
+    const segments = {
+        head: {
+            colors: [[200, 150, 100], [255, 220, 180]], // Broader skin tone range
+            bounds: { left: width, right: 0, top: height, bottom: 0 },
+            center: { x: 0, y: 0 },
+            pixels: new Set()
+        },
+        dress: {
+            colors: [[200, 50, 100], [255, 180, 220]], // Broader pink range
+            bounds: { left: width, right: 0, top: height, bottom: 0 },
+            center: { x: 0, y: 0 },
+            pixels: new Set()
+        },
+        hair: {
+            colors: [[200, 150, 0], [255, 255, 150]], // Broader blonde range
+            bounds: { left: width, right: 0, top: height, bottom: 0 },
+            center: { x: 0, y: 0 },
+            pixels: new Set()
+        }
+    };
+
+    // Flood fill to find connected components
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = y * width + x;
+            if (visited.has(i)) continue;
+
+            const pixel = pixels[i];
+            const alpha = (pixel >>> 24) & 0xFF;
+            if (alpha < 128) continue;
+
+            const r = pixel & 0xFF;
+            const g = (pixel >> 8) & 0xFF;
+            const b = (pixel >> 16) & 0xFF;
+
+            // Find matching segment
+            for (const [segmentName, segment] of Object.entries(segments)) {
+                if (this.isColorInRange(r, g, b, segment.colors[0], segment.colors[1])) {
+                    this.floodFillSegment(x, y, pixels, width, height, segment, visited);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Calculate center points for each segment
+    for (const segment of Object.values(segments)) {
+        if (segment.pixels.size > 0) {
+            segment.center = {
+                x: (segment.bounds.left + segment.bounds.right) / 2,
+                y: (segment.bounds.top + segment.bounds.bottom) / 2
+            };
+        }
+    }
+
+    return segments;
+  };
+
+  // Add color range check helper
+  ns.InterpolationService.prototype.isColorInRange = function(r, g, b, min, max) {
+    return r >= min[0] && r <= max[0] &&
+           g >= min[1] && g <= max[1] &&
+           b >= min[2] && b <= max[2];
+  };
+
+  // Add flood fill for segments
+  ns.InterpolationService.prototype.floodFillSegment = function(startX, startY, pixels, width, height, segment, visited) {
+    const stack = [[startX, startY]];
+    const startPixel = pixels[startY * width + startX];
+    const startR = startPixel & 0xFF;
+    const startG = (startPixel >> 8) & 0xFF;
+    const startB = (startPixel >> 16) & 0xFF;
+    const colorThreshold = 45; // Increased threshold for better segment connection
+
+    while (stack.length > 0) {
+        const [x, y] = stack.pop();
+        const i = y * width + x;
+
+        if (visited.has(i)) continue;
+        visited.add(i);
+
+        const pixel = pixels[i];
+        const r = pixel & 0xFF;
+        const g = (pixel >> 8) & 0xFF;
+        const b = (pixel >> 16) & 0xFF;
+        const alpha = (pixel >>> 24) & 0xFF;
+
+        // Check if pixel is similar to start pixel
+        if (alpha < 128 || 
+            Math.abs(r - startR) > colorThreshold ||
+            Math.abs(g - startG) > colorThreshold ||
+            Math.abs(b - startB) > colorThreshold) {
+            continue;
+        }
+
+        // Update segment bounds
+        segment.bounds.left = Math.min(segment.bounds.left, x);
+        segment.bounds.right = Math.max(segment.bounds.right, x);
+        segment.bounds.top = Math.min(segment.bounds.top, y);
+        segment.bounds.bottom = Math.max(segment.bounds.bottom, y);
+        segment.pixels.add(i);
+
+        // Add neighbors to stack
+        for (const [dx, dy] of [[-1,0], [1,0], [0,-1], [0,1]]) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                stack.push([nx, ny]);
+            }
+        }
+    }
+  };
+
+  // Add improved dithering pattern
+  ns.InterpolationService.prototype.getBayerMatrix = function() {
+    return [
+        [0, 8, 2, 10],
+        [12, 4, 14, 6],
+        [3, 11, 1, 9],
+        [15, 7, 13, 5]
+    ].map(row => row.map(x => (x / 16) - 0.5)); // Normalize to [-0.5, 0.5] range
+  };
+
+  // Add improved palette color matching with dithering
+  ns.InterpolationService.prototype.findClosestColorWithDither = function(r, g, b, palette, x, y) {
+    let closestColor = palette[0];
+    let minDistance = Number.MAX_VALUE;
+    
+    // Add slight spatial variation to color matching
+    const variation = ((x + y) % 2) * 2 - 1; // Alternating +1/-1 pattern
+    
+    for (const color of palette) {
+        const pr = color & 0xFF;
+        const pg = (color >> 8) & 0xFF;
+        const pb = (color >> 16) & 0xFF;
+        
+        // Calculate weighted color distance with spatial variation
+        const dr = (r - pr + variation) * 0.299; // Weight red less
+        const dg = (g - pg + variation) * 0.587; // Weight green more
+        const db = (b - pb + variation) * 0.114; // Weight blue less
+        
+        const distance = dr * dr + dg * dg + db * db;
+        
+        if (distance < minDistance) {
+            minDistance = distance;
+            closestColor = color;
+        }
+    }
+    
+    return closestColor;
+  };
+
+  // Add tile-based motion matching
+  ns.InterpolationService.prototype.calculateTileMotion = function(pixels1, pixels2, width, height, tileSize = 8) {
+    const tiles = {};
+    const numTilesX = Math.ceil(width / tileSize);
+    const numTilesY = Math.ceil(height / tileSize);
+
+    // For each tile
+    for (let ty = 0; ty < numTilesY; ty++) {
+        for (let tx = 0; tx < numTilesX; tx++) {
+            const tileId = `${tx}_${ty}`;
+            const tileX = tx * tileSize;
+            const tileY = ty * tileSize;
+
+            // Skip empty tiles
+            if (!this.isTileVisible(pixels1, tileX, tileY, tileSize, width, height)) {
+                continue;
+            }
+
+            // Find best matching position in frame 2 with stricter matching
+            const motion = this.findBestTileMatch(
+                pixels1, pixels2, 
+                tileX, tileY, 
+                tileSize, width, height,
+                8  // Reduced search radius for more stable movement
+            );
+
+            if (motion) {
+                tiles[tileId] = {
+                    x: tileX,
+                    y: tileY,
+                    dx: motion.dx,
+                    dy: motion.dy,
+                    confidence: motion.confidence
+                };
+            }
+        }
+    }
+
+    // Smooth out tile motions to prevent breaking
+    this.smoothTileMotions(tiles, numTilesX, numTilesY);
+    return tiles;
+  };
+
+  // Add motion smoothing to prevent sprite breaking
+  ns.InterpolationService.prototype.smoothTileMotions = function(tiles, numTilesX, numTilesY) {
+    const smoothed = {};
+    
+    for (const [tileId, tile] of Object.entries(tiles)) {
+        const [tx, ty] = tileId.split('_').map(Number);
+        let avgDx = tile.dx;
+        let avgDy = tile.dy;
+        let count = 1;
+        
+        // Average with neighboring tiles
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                
+                const neighborId = `${tx + dx}_${ty + dy}`;
+                const neighbor = tiles[neighborId];
+                
+                if (neighbor) {
+                    avgDx += neighbor.dx;
+                    avgDy += neighbor.dy;
+                    count++;
+                }
+            }
+        }
+        
+        // Update motion with smoothed values
+        smoothed[tileId] = {
+            ...tile,
+            dx: Math.round(avgDx / count),
+            dy: Math.round(avgDy / count)
+        };
+    }
+    
+    // Apply smoothed motions back to tiles
+    Object.assign(tiles, smoothed);
+  };
+
+  // Update findBestTileMatch with better confidence calculation
+  ns.InterpolationService.prototype.findBestTileMatch = function(pixels1, pixels2, tileX, tileY, tileSize, width, height, searchRadius = 8) {
+    let bestMatch = { dx: 0, dy: 0, confidence: 0 };
+    let lowestDiff = Infinity;
+
+    // Search nearby positions
+    for (let dy = -searchRadius; dy <= searchRadius; dy++) {
+        for (let dx = -searchRadius; dx <= searchRadius; dx++) {
+            const diff = this.compareTiles(
+                pixels1, pixels2,
+                tileX, tileY,
+                tileX + dx, tileY + dy,
+                tileSize, width, height
+            );
+
+            // Add distance penalty to prefer smaller movements
+            const distancePenalty = (dx * dx + dy * dy) / (searchRadius * searchRadius);
+            const adjustedDiff = diff * (1 + distancePenalty * 0.5);
+
+            if (adjustedDiff < lowestDiff) {
+                lowestDiff = adjustedDiff;
+                bestMatch = {
+                    dx: dx,
+                    dy: dy,
+                    confidence: 1 - (diff / (tileSize * tileSize * 255))
+                };
+            }
+        }
+    }
+
+    // Increased confidence threshold
+    return bestMatch.confidence > 0.7 ? bestMatch : null;
+  };
+
+  // Add tile comparison method
+  ns.InterpolationService.prototype.compareTiles = function(pixels1, pixels2, x1, y1, x2, y2, tileSize, width, height) {
+    let totalDiff = 0;
+    let validPixels = 0;
+
+    // Compare corresponding pixels in both tiles
+    for (let dy = 0; dy < tileSize; dy++) {
+        for (let dx = 0; dx < tileSize; dx++) {
+            const px1 = x1 + dx;
+            const py1 = y1 + dy;
+            const px2 = x2 + dx;
+            const py2 = y2 + dy;
+
+            // Check bounds
+            if (px1 >= 0 && px1 < width && py1 >= 0 && py1 < height &&
+                px2 >= 0 && px2 < width && py2 >= 0 && py2 < height) {
+                
+                const i1 = py1 * width + px1;
+                const i2 = py2 * width + px2;
+
+                const pixel1 = pixels1[i1];
+                const pixel2 = pixels2[i2];
+
+                const alpha1 = (pixel1 >>> 24) & 0xFF;
+                const alpha2 = (pixel2 >>> 24) & 0xFF;
+
+                // Only compare visible pixels
+                if (alpha1 > 128 && alpha2 > 128) {
+                    // Compare RGB values
+                    const r1 = pixel1 & 0xFF;
+                    const g1 = (pixel1 >> 8) & 0xFF;
+                    const b1 = (pixel1 >> 16) & 0xFF;
+
+                    const r2 = pixel2 & 0xFF;
+                    const g2 = (pixel2 >> 8) & 0xFF;
+                    const b2 = (pixel2 >> 16) & 0xFF;
+
+                    // Calculate weighted color difference
+                    const dr = Math.abs(r1 - r2) * 0.299;
+                    const dg = Math.abs(g1 - g2) * 0.587;
+                    const db = Math.abs(b1 - b2) * 0.114;
+
+                    totalDiff += dr + dg + db;
+                    validPixels++;
+                }
+            }
+        }
+    }
+
+    // Return average difference per valid pixel, or Infinity if no valid pixels
+    return validPixels > 0 ? totalDiff / validPixels : Infinity;
+  };
+
+  // Add helper methods for tile processing
+  ns.InterpolationService.prototype.isTileVisible = function(pixels, tileX, tileY, tileSize, width, height) {
+    for (let y = tileY; y < Math.min(tileY + tileSize, height); y++) {
+        for (let x = tileX; x < Math.min(tileX + tileSize, width); x++) {
+            const alpha = (pixels[y * width + x] >>> 24) & 0xFF;
+            if (alpha > 128) return true;
+        }
+    }
+    return false;
+  };
+
+  // Update postProcessFrame to include pixel count based artifact removal
+  ns.InterpolationService.prototype.postProcessFrame = function(interpolatedPixels, frame1, frame2, timeStep, width, height) {
+    // Store frame references for getRegionColors
+    this.frame1 = frame1;
+    this.frame2 = frame2;
+    
+    const pixels1 = frame1.getPixels();
+    const pixels2 = frame2.getPixels();
+    const processedPixels = new Uint32Array(width * height);
+    const colorMap = new Map();
+
+    // First pass: Process colors and transparency
+    for (let i = 0; i < interpolatedPixels.length; i++) {
+        processedPixels[i] = interpolatedPixels[i];
+    }
+
+    // Apply transparency mask
+    this.applyTransparencyMask(processedPixels, pixels1, pixels2, timeStep, width, height);
+    
+    // Remove artifacts based on pixel count
+    this.removeArtifactsByPixelCount(processedPixels, frame1, frame2, width, height);
+    
+    return processedPixels;
+};
+
+  // Add color region identification
+  ns.InterpolationService.prototype.identifyColorRegions = function(pixels1, pixels2, width, height) {
+    const regions = new Uint32Array(width * height);
+    const visited = new Set();
+    let regionId = 1;
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = y * width + x;
+            if (visited.has(i)) continue;
+
+            const pixel1 = pixels1[i];
+            const pixel2 = pixels2[i];
+            const alpha1 = (pixel1 >>> 24) & 0xFF;
+            const alpha2 = (pixel2 >>> 24) & 0xFF;
+
+            if (alpha1 > 128 || alpha2 > 128) {
+                // Flood fill to find connected region
+                this.floodFillRegion(
+                    x, y, pixels1, pixels2,
+                    regions, visited, regionId,
+                    width, height
+                );
+                regionId++;
+            }
+        }
+    }
+
+    return regions;
+};
+
+  // Add color bleeding detection
+  ns.InterpolationService.prototype.isColorBleeding = function(pixel, region) {
+    if (!region) return false;
+
+    const r = pixel & 0xFF;
+    const g = (pixel >> 8) & 0xFF;
+    const b = (pixel >> 16) & 0xFF;
+
+    // Check if color is significantly different from region colors
+    const regionColors = this.getRegionColors(region);
+    return !regionColors.some(color => {
+        const dr = Math.abs(r - (color & 0xFF));
+        const dg = Math.abs(g - ((color >> 8) & 0xFF));
+        const db = Math.abs(b - ((color >> 16) & 0xFF));
+        return (dr + dg + db) < 30; // Adjust threshold as needed
+    });
+};
+
+  // Add color correction
+  ns.InterpolationService.prototype.correctPixelColor = function(x, y, pixel, pixels1, pixels2, region, timeStep, width, height, colorMap) {
+    const key = `${x},${y},${region}`;
+    if (colorMap.has(key)) {
+        return colorMap.get(key);
+    }
+
+    // Get dominant colors from the region
+    const regionColors = this.getRegionColors(region);
+    
+    // Find closest valid color
+    const r = pixel & 0xFF;
+    const g = (pixel >> 8) & 0xFF;
+    const b = (pixel >> 16) & 0xFF;
+    const a = (pixel >>> 24) & 0xFF;
+
+    let bestColor = pixel;
+    let minDiff = Infinity;
+
+    for (const color of regionColors) {
+        const dr = r - (color & 0xFF);
+        const dg = g - ((color >> 8) & 0xFF);
+        const db = b - ((color >> 16) & 0xFF);
+        
+        const diff = (dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114);
+        
+        if (diff < minDiff) {
+            minDiff = diff;
+            bestColor = color;
+        }
+    }
+
+    // Preserve alpha
+    const correctedColor = (a << 24) | (bestColor & 0x00FFFFFF);
+    colorMap.set(key, correctedColor);
+    return correctedColor;
+};
+
+  // Add edge preservation
+  ns.InterpolationService.prototype.preserveEdges = function(pixels, regions, width, height) {
+    const edgePixels = new Set();
+
+    // Identify edge pixels
+    for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+            const i = y * width + x;
+            if (this.isEdgePixel(pixels, regions, x, y, width)) {
+                edgePixels.add(i);
+            }
+        }
+    }
+
+    // Enhance edge pixels
+    for (const i of edgePixels) {
+        const pixel = pixels[i];
+        const alpha = (pixel >>> 24) & 0xFF;
+        if (alpha > 128) {
+            // Sharpen edges by increasing contrast
+            const r = Math.min(255, Math.max(0, ((pixel & 0xFF) * 1.2)));
+            const g = Math.min(255, Math.max(0, (((pixel >> 8) & 0xFF) * 1.2)));
+            const b = Math.min(255, Math.max(0, (((pixel >> 16) & 0xFF) * 1.2)));
+            pixels[i] = (alpha << 24) | (b << 16) | (g << 8) | r;
+        }
+    }
+};
+
+  // Add flood fill region method
+  ns.InterpolationService.prototype.floodFillRegion = function(startX, startY, pixels1, pixels2, regions, visited, regionId, width, height) {
+    const stack = [[startX, startY]];
+    const startPixel1 = pixels1[startY * width + startX];
+    const startPixel2 = pixels2[startY * width + startX];
+    const colorThreshold = 30;
+
+    while (stack.length > 0) {
+        const [x, y] = stack.pop();
+        const i = y * width + x;
+
+        if (visited.has(i)) continue;
+        visited.add(i);
+
+        // Get colors from both frames
+        const pixel1 = pixels1[i];
+        const pixel2 = pixels2[i];
+        const alpha1 = (pixel1 >>> 24) & 0xFF;
+        const alpha2 = (pixel2 >>> 24) & 0xFF;
+
+        // Skip transparent pixels
+        if (alpha1 < 128 && alpha2 < 128) continue;
+
+        // Check color similarity with start pixel
+        if (this.isColorSimilar(pixel1, startPixel1, colorThreshold) ||
+            this.isColorSimilar(pixel2, startPixel2, colorThreshold)) {
+            
+            // Mark pixel as part of region
+            regions[i] = regionId;
+
+            // Add neighbors to stack
+            for (const [dx, dy] of [[-1,0], [1,0], [0,-1], [0,1]]) {
+                const nx = x + dx;
+                const ny = y + dy;
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                    stack.push([nx, ny]);
+                }
+            }
+        }
+    }
+};
+
+  // Add color similarity check helper
+  ns.InterpolationService.prototype.isColorSimilar = function(color1, color2, threshold) {
+    const r1 = color1 & 0xFF;
+    const g1 = (color1 >> 8) & 0xFF;
+    const b1 = (color1 >> 16) & 0xFF;
+    
+    const r2 = color2 & 0xFF;
+    const g2 = (color2 >> 8) & 0xFF;
+    const b2 = (color2 >> 16) & 0xFF;
+
+    const dr = Math.abs(r1 - r2);
+    const dg = Math.abs(g1 - g2);
+    const db = Math.abs(b1 - b2);
+
+    return (dr + dg + db) < threshold;
+};
+
+  // Add method to get region colors
+  ns.InterpolationService.prototype.getRegionColors = function(regionId) {
+    if (!regionId) return [];
+
+    const colors = new Set();
+    const pixels1 = this.frame1.getPixels();
+    const pixels2 = this.frame2.getPixels();
+    const width = this.frame1.getWidth();
+    const height = this.frame1.getHeight();
+
+    // Sample colors from both frames
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = y * width + x;
+            if (this.regions[i] === regionId) {
+                const pixel1 = pixels1[i];
+                const pixel2 = pixels2[i];
+                const alpha1 = (pixel1 >>> 24) & 0xFF;
+                const alpha2 = (pixel2 >>> 24) & 0xFF;
+
+                if (alpha1 > 128) colors.add(pixel1 & 0x00FFFFFF);
+                if (alpha2 > 128) colors.add(pixel2 & 0x00FFFFFF);
+            }
+        }
+    }
+
+    return Array.from(colors);
+};
+
+  // Add helper to apply transparency mask
+  ns.InterpolationService.prototype.applyTransparencyMask = function(pixels, pixels1, pixels2, timeStep, width, height) {
+    for (let i = 0; i < pixels.length; i++) {
+        const alpha1 = (pixels1[i] >>> 24) & 0xFF;
+        const alpha2 = (pixels2[i] >>> 24) & 0xFF;
+
+        // If pixel should be transparent in both frames, make it transparent
+        if (alpha1 < 128 && alpha2 < 128) {
+            pixels[i] = 0;
+            continue;
+        }
+
+        // If pixel is transitioning between transparent and opaque
+        if ((alpha1 < 128) !== (alpha2 < 128)) {
+            const currentAlpha = (pixels[i] >>> 24) & 0xFF;
+            const targetAlpha = Math.round(
+                (alpha1 < 128 ? 0 : alpha1) * (1 - timeStep) +
+                (alpha2 < 128 ? 0 : alpha2) * timeStep
+            );
+            
+            // Update alpha while preserving RGB
+            pixels[i] = (targetAlpha << 24) | (pixels[i] & 0x00FFFFFF);
+        }
+    }
+};
+
+  // Update removeArtifactsByPixelCount to be more aggressive with low intensity artifacts
+  ns.InterpolationService.prototype.removeArtifactsByPixelCount = function(interpolatedPixels, frame1, frame2, width, height) {
+    const pixels1 = frame1.getPixels();
+    const pixels2 = frame2.getPixels();
+    
+    // Get color intensity ranges from original frames
+    const intensityRanges = this.getColorIntensityRanges(pixels1, pixels2);
+    const { minIntensity, maxIntensity, avgIntensity } = intensityRanges;
+    
+    // Count non-transparent pixels in original frames
+    const count1 = this.countNonTransparentPixels(pixels1);
+    const count2 = this.countNonTransparentPixels(pixels2);
+    const targetCount = Math.round((count1 + count2) / 2);
+    
+    // Process pixels
+    const pixelsToRemove = [];
+    let currentCount = 0;
+    
+    // First pass: Mark low intensity pixels and calculate local intensity
+    const localIntensities = new Float32Array(width * height);
+    
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = y * width + x;
+            const pixel = interpolatedPixels[i];
+            const alpha = (pixel >>> 24) & 0xFF;
+            
+            if (alpha > 128) {
+                currentCount++;
+                
+                // Calculate pixel intensity
+                const r = pixel & 0xFF;
+                const g = (pixel >> 8) & 0xFF;
+                const b = (pixel >> 16) & 0xFF;
+                const intensity = (r * 0.299 + g * 0.587 + b * 0.114);
+                
+                // Calculate local average intensity
+                const localIntensity = this.calculateLocalIntensity(x, y, interpolatedPixels, width, height);
+                localIntensities[i] = localIntensity;
+                
+                // Check if pixel exists in original frames
+                const existsInOriginal = (pixels1[i] >>> 24) > 128 || (pixels2[i] >>> 24) > 128;
+                
+                // Calculate intensity deviation from both global and local averages
+                const globalDeviation = Math.abs(intensity - avgIntensity) / (maxIntensity - minIntensity);
+                const localDeviation = Math.abs(intensity - localIntensity) / localIntensity;
+                
+                // More aggressive criteria for removal:
+                // 1. Not in original frames AND
+                // 2. Either significantly deviates from global intensity OR
+                // 3. Significantly deviates from local intensity OR
+                // 4. Is an isolated pixel with low intensity
+                if (!existsInOriginal && (
+                    globalDeviation > 0.2 || // Reduced threshold (was 0.3)
+                    localDeviation > 0.25 ||
+                    (this.isIsolatedPixel(x, y, interpolatedPixels, width, height) && intensity < avgIntensity) ||
+                    intensity < minIntensity * 1.2 // Remove very low intensity pixels
+                )) {
+                    pixelsToRemove.push({
+                        index: i,
+                        deviation: Math.max(globalDeviation, localDeviation),
+                        intensity: intensity
+                    });
+                }
+            }
+        }
+    }
+    
+    // Sort pixels by deviation AND intensity (prioritize removing low intensity pixels)
+    pixelsToRemove.sort((a, b) => {
+        // Prioritize low intensity pixels more heavily
+        const intensityWeight = 0.7;
+        const deviationWeight = 0.3;
+        
+        const scoreA = (intensityWeight * (1 - a.intensity/255)) + (deviationWeight * a.deviation);
+        const scoreB = (intensityWeight * (1 - b.intensity/255)) + (deviationWeight * b.deviation);
+        return scoreB - scoreA;
+    });
+    
+    // Remove pixels more aggressively
+    const excessCount = Math.max(
+        currentCount - targetCount,
+        Math.floor(pixelsToRemove.length * 0.8) // Remove at least 80% of suspicious pixels
+    );
+    
+    for (let i = 0; i < excessCount && i < pixelsToRemove.length; i++) {
+        interpolatedPixels[pixelsToRemove[i].index] = 0;
+    }
+    
+    return interpolatedPixels;
+};
+
+  // Add helper to calculate local intensity
+  ns.InterpolationService.prototype.calculateLocalIntensity = function(x, y, pixels, width, height) {
+    let totalIntensity = 0;
+    let count = 0;
+    const radius = 2; // Check 5x5 neighborhood
+    
+    for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+        const nx = x + dx;
+        const ny = y + dy;
+        
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                const pixel = pixels[ny * width + nx];
+                const alpha = (pixel >>> 24) & 0xFF;
+                
+                if (alpha > 128) {
+                    const r = pixel & 0xFF;
+                    const g = (pixel >> 8) & 0xFF;
+                    const b = (pixel >> 16) & 0xFF;
+                    totalIntensity += (r * 0.299 + g * 0.587 + b * 0.114);
+                    count++;
+                }
+            }
+        }
+    }
+    
+    return count > 0 ? totalIntensity / count : 0;
+};
+
+  // Add helper to get color intensity ranges from original frames
+  ns.InterpolationService.prototype.getColorIntensityRanges = function(pixels1, pixels2) {
+    let minIntensity = Infinity;
+    let maxIntensity = -Infinity;
+    let totalIntensity = 0;
+    let validPixels = 0;
+    
+    // Process both frames
+    for (const pixels of [pixels1, pixels2]) {
+        for (let i = 0; i < pixels.length; i++) {
+            const alpha = (pixels[i] >>> 24) & 0xFF;
+            if (alpha > 128) {
+                const r = pixels[i] & 0xFF;
+                const g = (pixels[i] >> 8) & 0xFF;
+                const b = (pixels[i] >> 16) & 0xFF;
+                const intensity = (r * 0.299 + g * 0.587 + b * 0.114);
+                
+                minIntensity = Math.min(minIntensity, intensity);
+                maxIntensity = Math.max(maxIntensity, intensity);
+                totalIntensity += intensity;
+                validPixels++;
+            }
+        }
+    }
+    
+    return {
+        minIntensity,
+        maxIntensity,
+        avgIntensity: totalIntensity / validPixels
+    };
+};
+
+  // Add helper to count non-transparent pixels
+  ns.InterpolationService.prototype.countNonTransparentPixels = function(pixels) {
+    let count = 0;
+    for (let i = 0; i < pixels.length; i++) {
+        if ((pixels[i] >>> 24) & 0xFF > 128) {
+            count++;
+        }
+    }
+    return count;
+};
+
+  // Add mask-based region tracking
+  ns.InterpolationService.prototype.createRegionMasks = function(frame1, frame2) {
+    const width = frame1.getWidth();
+    const height = frame1.getHeight();
+    const pixels1 = frame1.getPixels();
+    const pixels2 = frame2.getPixels();
+    
+    // Create binary masks for both frames
+    const mask1 = new Uint8Array(width * height);
+    const mask2 = new Uint8Array(width * height);
+    
+    // Create region labels
+    const regions1 = new Uint32Array(width * height);
+    const regions2 = new Uint32Array(width * height);
+    
+    // Track unique regions and their properties
+    const regionProps = new Map();
+    let nextRegionId = 1;
+
+    // First pass: Create binary masks and initial regions
+    for (let i = 0; i < pixels1.length; i++) {
+        // Create binary masks (1 for non-transparent pixels)
+        mask1[i] = (pixels1[i] >>> 24) > 128 ? 1 : 0;
+        mask2[i] = (pixels2[i] >>> 24) > 128 ? 1 : 0;
+        
+        if (mask1[i]) {
+            const x = i % width;
+            const y = Math.floor(i / width);
+            const regionId = this.floodFillRegion(x, y, pixels1, width, height, regions1, nextRegionId);
+            
+            if (regionId === nextRegionId) {
+                // New region found
+                regionProps.set(regionId, {
+                    color: pixels1[i] & 0x00FFFFFF,
+                    bounds: { minX: x, maxX: x, minY: y, maxY: y },
+                    pixels: new Set([i])
+                });
+                nextRegionId++;
+            } else {
+                // Add to existing region
+                const props = regionProps.get(regionId);
+                props.bounds.minX = Math.min(props.bounds.minX, x);
+                props.bounds.maxX = Math.max(props.bounds.maxX, x);
+                props.bounds.minY = Math.min(props.bounds.minY, y);
+                props.bounds.maxY = Math.max(props.bounds.maxY, y);
+                props.pixels.add(i);
+            }
+        }
+    }
+
+    return {
+        masks: { frame1: mask1, frame2: mask2 },
+        regions: { frame1: regions1, frame2: regions2 },
+        props: regionProps
+    };
+};
+
+  // Update blobToFrame to use mask-based interpolation
+  ns.InterpolationService.prototype.blobToFrame = async function(blob, originalSize, sourcePalette, alphaMask1, alphaMask2, timeStep, frame1, frame2) {
+    try {
+        const img = await createImageBitmap(blob, { resizeQuality: 'pixelated' });
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
         canvas.width = originalSize.width;
         canvas.height = originalSize.height;
         ctx.imageSmoothingEnabled = false;
-        
-        // Draw sprite
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         
-        // Get image data
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        
-        // Apply dithering with source palette if available
-        if (Array.isArray(sourcePalette) && sourcePalette.length > 0) {
-          this.applyFloydSteinbergDithering(imageData, sourcePalette);
-        }
-        
-        // Put dithered image back
-        ctx.putImageData(imageData, 0, 0);
-        
-        // Convert to frame
-        const pixels = new Uint32Array(canvas.width * canvas.height);
-        const finalImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        
-        for (let i = 0; i < pixels.length; i++) {
-            const offset = i * 4;
-            const r = finalImageData.data[offset];
-            const g = finalImageData.data[offset + 1];
-            const b = finalImageData.data[offset + 2];
-            const a = finalImageData.data[offset + 3];
-            
-            if (a > 128) {
-                pixels[i] = 
-                    (0xFF << 24) |    // Full alpha
-                    (b << 16) |       // Blue
-                    (g << 8)  |       // Green
-                    r;                // Red
-            } else {
-                pixels[i] = 0;
+        const data = imageData.data;
+        const pixels1 = frame1.getPixels();
+        const pixels2 = frame2.getPixels();
+        const outputPixels = new Uint32Array(canvas.width * canvas.height);
+
+        // Calculate tile motion
+        const tileMotions = this.calculateTileMotion(
+            pixels1, pixels2,
+            canvas.width, canvas.height,
+            8  // Increased from 4 to 8
+        );
+
+        // Process pixels
+        for (let y = 0; y < canvas.height; y++) {
+            for (let x = 0; x < canvas.width; x++) {
+                const i = y * canvas.width + x;
+                
+                // Find which tile this pixel belongs to
+                const tileX = Math.floor(x / 8);  // Match new tile size
+                const tileY = Math.floor(y / 8);
+                const tileId = `${tileX}_${tileY}`;
+                const tileMotion = tileMotions[tileId];
+
+                // Calculate offset based on tile motion with stability check
+                const offset = tileMotion ? {
+                    x: Math.round(tileMotion.dx * timeStep * tileMotion.confidence),
+                    y: Math.round(tileMotion.dy * timeStep * tileMotion.confidence)
+                } : { x: 0, y: 0 };
+
+                // Get source position with motion compensation
+                const sx = x - offset.x;
+                const sy = y - offset.y;
+
+                // Get colors with bounds checking
+                const color1 = (sx >= 0 && sx < canvas.width && sy >= 0 && sy < canvas.height) 
+                    ? pixels1[sy * canvas.width + sx] 
+                    : pixels1[i];  // Fall back to original position if out of bounds
+                const color2 = pixels2[i];
+
+                const alpha1 = (color1 >>> 24) & 0xFF;
+                const alpha2 = (color2 >>> 24) & 0xFF;
+
+                if (alpha1 < 128 && alpha2 < 128) {
+                    outputPixels[i] = 0;
+                    continue;
+                }
+
+                // Blend colors
+                const r1 = color1 & 0xFF;
+                const g1 = (color1 >> 8) & 0xFF;
+                const b1 = (color1 >> 16) & 0xFF;
+
+                const r2 = color2 & 0xFF;
+                const g2 = (color2 >> 8) & 0xFF;
+                const b2 = (color2 >> 16) & 0xFF;
+
+                const r = Math.round(r1 * (1 - timeStep) + r2 * timeStep);
+                const g = Math.round(g1 * (1 - timeStep) + g2 * timeStep);
+                const b = Math.round(b1 * (1 - timeStep) + b2 * timeStep);
+                const a = Math.round(alpha1 * (1 - timeStep) + alpha2 * timeStep);
+
+                if (sourcePalette && sourcePalette.length > 0) {
+                    const finalColor = this.findClosestColorWithDither(r, g, b, sourcePalette, x, y);
+                    outputPixels[i] = (a << 24) | (finalColor & 0x00FFFFFF);
+                } else {
+                    outputPixels[i] = (a << 24) | (b << 16) | (g << 8) | r;
+                }
             }
         }
-        
-        const frame = new pskl.model.Frame(originalSize.width, originalSize.height);
-        frame.setPixels(pixels);
-        return frame;
+
+        // Apply post-processing
+        const processedPixels = this.postProcessFrame(
+            outputPixels,
+            frame1,
+            frame2,
+            timeStep,
+            canvas.width,
+            canvas.height
+        );
+
+        const newFrame = new pskl.model.Frame(originalSize.width, originalSize.height);
+        newFrame.setPixels(processedPixels);
+        return newFrame;
+
     } catch (error) {
         console.error('Error converting blob to frame:', error);
         throw error;
     }
   };
 
-  // Add helper method to get sprite bounds from an image
-  ns.InterpolationService.prototype.getImageSpriteBounds = async function(img) {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = img.width;
-    canvas.height = img.height;
-    
-    // Draw image to analyze its pixels
-    ctx.drawImage(img, 0, 0);
-    const imageData = ctx.getImageData(0, 0, img.width, img.height);
-    
-    let minX = img.width;
-    let minY = img.height;
-    let maxX = 0;
-    let maxY = 0;
-    
-    // Find bounds of non-black pixels
-    for (let y = 0; y < img.height; y++) {
-        for (let x = 0; x < img.width; x++) {
-            const offset = (y * img.width + x) * 4;
-            const r = imageData.data[offset];
-            const g = imageData.data[offset + 1];
-            const b = imageData.data[offset + 2];
-            
-            if (r !== 0 || g !== 0 || b !== 0) {
-                minX = Math.min(minX, x);
-                minY = Math.min(minY, y);
-                maxX = Math.max(maxX, x);
-                maxY = Math.max(maxY, y);
+  // Add helper to calculate region motions using tiles
+  ns.InterpolationService.prototype.calculateRegionMotions = function(regionData, frame1, frame2, width, height) {
+    const motions = new Map();
+    const tileSize = 8; // Use 8x8 tiles for motion detection
+
+    for (const [regionId, props] of regionData.props.entries()) {
+        // Calculate tile-based motion for this region
+        const regionTiles = this.getTilesForRegion(props, tileSize, width, height);
+        const tileMotions = this.calculateTileMotion(
+            frame1.getPixels(), frame2.getPixels(),
+            width, height, tileSize,
+            regionTiles // Pass region tiles to limit search area
+        );
+
+        // Aggregate tile motions for this region
+        const avgMotion = this.aggregateRegionMotion(tileMotions, props);
+        motions.set(regionId, avgMotion);
+    }
+
+    return motions;
+};
+
+  // Add helper to fill gaps between regions
+  ns.InterpolationService.prototype.fillRegionGaps = function(pixels, frame1, frame2, timeStep, width, height) {
+    for (let i = 0; i < pixels.length; i++) {
+        if ((pixels[i] >>> 24) < 128) {
+            // Find nearest non-transparent pixel from both frames
+            const x = i % width;
+            const y = Math.floor(i / width);
+            const nearest1 = this.findNearestPixel(x, y, frame1, width, height);
+            const nearest2 = this.findNearestPixel(x, y, frame2, width, height);
+
+            if (nearest1 && nearest2) {
+                // Use nearest pixel from appropriate frame based on timeStep
+                pixels[i] = timeStep < 0.5 ? nearest1 : nearest2;
             }
         }
     }
+  };
+
+  // Add helper method to extract alpha mask
+  ns.InterpolationService.prototype.extractAlphaMask = function(frame) {
+    const width = frame.getWidth();
+    const height = frame.getHeight();
+    const pixels = frame.getPixels();
+    const mask = new Uint8Array(width * height);
     
-    return { minX, minY, maxX, maxY };
-  };
-
-  // Add new method for RIFE frame generation
-  ns.InterpolationService.prototype.generateRifeFrame = function (frame1, frame2) {
-    var deferred = Q.defer();
-
-    // Convert frames to image data
-    var image1 = this.frameToImage(frame1);
-    var image2 = this.frameToImage(frame2);
-
-    // Create form data with the images
-    var formData = new FormData();
-    formData.append('frame1', this.dataURItoBlob(image1), 'frame1.png');
-    formData.append('frame2', this.dataURItoBlob(image2), 'frame2.png');
-    formData.append('time_step', '0.5');  // Middle frame
-
-    // Send to RIFE server
-    fetch('http://localhost:8000/interpolate', {
-      method: 'POST',
-      body: formData
-    })
-    .then(function (response) {
-      if (!response.ok) {
-        throw new Error('RIFE server error');
-      }
-      return response.blob();
-    })
-    .then(function (blob) {
-      // Convert blob to image
-      return this.blobToImage(blob);
-    }.bind(this))
-    .then(function (image) {
-      // Convert image to frame data
-      var frame = this.imageToFrame(image);
-      deferred.resolve(frame);
-    }.bind(this))
-    .catch(function (error) {
-      console.error('RIFE generation failed:', error);
-      deferred.reject(error);
-    });
-
-    return deferred.promise;
-  };
-
-  // Helper method to convert data URI to Blob
-  ns.InterpolationService.prototype.dataURItoBlob = function (dataURI) {
-    var binary = atob(dataURI.split(',')[1]);
-    var array = [];
-    for (var i = 0; i < binary.length; i++) {
-      array.push(binary.charCodeAt(i));
+    for (let i = 0; i < pixels.length; i++) {
+        const alpha = (pixels[i] >>> 24) & 0xFF;
+        // Create binary mask (255 for non-transparent, 0 for transparent)
+        mask[i] = alpha > 128 ? 255 : 0;
     }
-    return new Blob([new Uint8Array(array)], {type: 'image/png'});
-  };
 
-  // Helper method to convert Blob to Image
-  ns.InterpolationService.prototype.blobToImage = function (blob) {
-    var deferred = Q.defer();
-    var img = new Image();
-    img.onload = function () {
-      deferred.resolve(img);
-    };
-    img.src = URL.createObjectURL(blob);
-    return deferred.promise;
-  };
+    return mask;
+};
 
-  // Helper method to convert image to frame
-  ns.InterpolationService.prototype.imageToFrame = function (image) {
-    // Implementation of imageToFrame method
-  };
-
-  // Update generateTimeSteps to create more evenly distributed steps
+  // Add back generateTimeSteps method
   ns.InterpolationService.prototype.generateTimeSteps = function(numFrames) {
     const timeSteps = [];
     // Generate evenly spaced time steps between 0 and 1
@@ -1189,47 +2302,24 @@
     }
     console.log('Generated time steps:', timeSteps);
     return timeSteps;
-  };
+};
 
-  // Update processFramesForRIFE to handle frame preparation
-  ns.InterpolationService.prototype.processFramesForRIFE = async function(frame1, frame2) {
-    // Verify frames have same dimensions
-    if (frame1.getWidth() !== frame2.getWidth() || frame1.getHeight() !== frame2.getHeight()) {
-        throw new Error('Frames must have the same dimensions');
-    }
-
-    // Convert frames to blobs
-    const blob1 = await this.frameToBlob(frame1);
-    const blob2 = await this.frameToBlob(frame2);
-
-    return {
-        blob1,
-        blob2,
-        originalSize: {
-            width: frame1.getWidth(),
-            height: frame1.getHeight()
-        }
-    };
-  };
-
+  // Add back sendRIFERequest method
   ns.InterpolationService.prototype.sendRIFERequest = async function(blob1, blob2, timeStep) {
-    // Create form data
     const formData = new FormData();
     formData.append('frame1', blob1, 'frame1.png');
     formData.append('frame2', blob2, 'frame2.png');
     formData.append('time_step', timeStep.toString());
 
-    // Call RIFE server with CORS headers
     const response = await fetch('http://localhost:8000/interpolate', {
         method: 'POST',
         body: formData,
-        mode: 'cors', // Enable CORS
+        mode: 'cors',
         headers: {
             'Accept': 'image/png'
         }
     });
 
-    // Log response details for debugging
     console.log('RIFE server response:', {
         status: response.status,
         statusText: response.statusText,
@@ -1239,59 +2329,92 @@
     return response;
   };
 
-  // Add helper method to get neighboring pixel colors
-  ns.InterpolationService.prototype.getNeighborColors = function(data, x, y, width, height) {
-    const neighbors = [];
-    const offsets = [
-        [-1, -1], [0, -1], [1, -1],
-        [-1,  0],          [1,  0],
-        [-1,  1], [0,  1], [1,  1]
-    ];
-    
-    for (const [dx, dy] of offsets) {
-        const nx = x + dx;
-        const ny = y + dy;
-        
-        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-            const idx = (ny * width + nx) * 4;
-            neighbors.push({
-                r: data[idx],
-                g: data[idx + 1],
-                b: data[idx + 2],
-                a: data[idx + 3]
-            });
+  // Add new method to extract and validate color palette
+  ns.InterpolationService.prototype.extractAndValidatePalette = function(frame1, frame2) {
+    // ... existing code ...
+
+    // Add improved palette extraction
+    const palette = new Set();
+    const pixels1 = frame1.getPixels();
+    const pixels2 = frame2.getPixels();
+
+    // Extract unique colors from both frames
+    for (const pixels of [pixels1, pixels2]) {
+      for (const pixel of pixels) {
+        if ((pixel >>> 24) & 0xFF > 128) { // Only include non-transparent colors
+          palette.add(pixel & 0x00FFFFFF); // Store RGB only
         }
+      }
     }
-    
-    return neighbors;
+
+    return Array.from(palette);
   };
 
-  // Add helper method to determine if a pixel should be sharpened
-  ns.InterpolationService.prototype.shouldSharpenPixel = function(neighbors) {
-    if (neighbors.length < 8) return false;
-    
-    // Get center pixel color (current pixel being processed)
-    const center = {
-        r: neighbors[4].r,
-        g: neighbors[4].g,
-        b: neighbors[4].b
-    };
-    
-    // Count how many neighbors are significantly different
-    let differentNeighbors = 0;
-    const threshold = 32; // Color difference threshold
-    
-    for (const neighbor of neighbors) {
-        const dr = Math.abs(center.r - neighbor.r);
-        const dg = Math.abs(center.g - neighbor.g);
-        const db = Math.abs(center.b - neighbor.b);
-        
-        if (dr > threshold || dg > threshold || db > threshold) {
-            differentNeighbors++;
-        }
+  // Update findClosestColor to be more accurate for pixel art
+  ns.InterpolationService.prototype.findClosestColor = function(r, g, b, palette) {
+    let bestMatch = palette[0];
+    let minDistance = Infinity;
+
+    // Weight factors for RGB components (human perception)
+    const rWeight = 0.299;
+    const gWeight = 0.587; 
+    const bWeight = 0.114;
+
+    for (const color of palette) {
+      const pr = color & 0xFF;
+      const pg = (color >> 8) & 0xFF;
+      const pb = (color >> 16) & 0xFF;
+
+      // Calculate weighted color distance
+      const distance = 
+        rWeight * Math.pow(r - pr, 2) +
+        gWeight * Math.pow(g - pg, 2) +
+        bWeight * Math.pow(b - pb, 2);
+
+      if (distance < minDistance) {
+        minDistance = distance;
+        bestMatch = color;
+      }
+    }
+
+    return bestMatch;
+  };
+
+  // Add method to handle color transitions
+  ns.InterpolationService.prototype.interpolateColors = function(color1, color2, t, palette) {
+    // Extract components
+    const r1 = color1 & 0xFF;
+    const g1 = (color1 >> 8) & 0xFF;
+    const b1 = (color1 >> 16) & 0xFF;
+    const a1 = (color1 >>> 24) & 0xFF;
+
+    const r2 = color2 & 0xFF;
+    const g2 = (color2 >> 8) & 0xFF;
+    const b2 = (color2 >> 16) & 0xFF;
+    const a2 = (color2 >>> 24) & 0xFF;
+
+    // If either color is transparent, handle specially
+    if (a1 < 128 && a2 < 128) {
+      return 0; // Both transparent
     }
     
-    // If more than 2 neighbors are different, this might be an edge
-    return differentNeighbors > 2;
+    if (a1 < 128 || a2 < 128) {
+      // One color is transparent - use hard transition at t=0.5
+      return t < 0.5 ? color1 : color2;
+    }
+
+    // For palette colors, find closest match
+    if (palette && palette.length > 0) {
+      // Use hard transition at t=0.5 to avoid color blending
+      return t < 0.5 ? color1 : color2;
+    }
+
+    // For non-palette colors, interpolate smoothly
+    const r = Math.round(r1 * (1 - t) + r2 * t);
+    const g = Math.round(g1 * (1 - t) + g2 * t);
+    const b = Math.round(b1 * (1 - t) + b2 * t);
+    const a = Math.round(a1 * (1 - t) + a2 * t);
+
+    return (a << 24) | (b << 16) | (g << 8) | r;
   };
 })(); 

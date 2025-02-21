@@ -220,7 +220,7 @@
         const numFrames = parseInt(this.frameCountSlider.value, 10);
         
         // Process frames for RIFE
-        const processedFrames = await this.interpolationService.processFramesForRIFE(frame1, frame2);
+        const processedFrames = await this.processFramePair(frame1, frame2);
         
         // Generate time steps
         const timeSteps = this.interpolationService.generateTimeSteps(numFrames);
@@ -246,15 +246,20 @@
                     throw new Error(`Server error (${response.status}): ${errorText}`);
                 }
 
-                // Convert response to frame
+                // Convert response to frame with alpha mask interpolation
                 const blob = await response.blob();
                 const frame = await this.interpolationService.blobToFrame(
                     blob,
                     processedFrames.originalSize,
-                    this.interpolationService.extractColorPalette(frame1)
+                    this.interpolationService.extractColorPalette(frame1),
+                    processedFrames.alphaMask1,
+                    processedFrames.alphaMask2,
+                    timeStep,
+                    frame1,  // Pass original frames
+                    frame2
                 );
                 
-                if (frame) { // Add null check
+                if (frame) {
                     generatedFrames.push(frame);
                 }
             } catch (error) {
@@ -285,6 +290,60 @@
         this.generateRifeButton.disabled = false;
         this.generateRifeButton.textContent = 'Generate with RIFE';
     }
+  };
+
+  ns.GenerateFramesController.prototype.processFramePair = async function(frame1, frame2) {
+    const interpolationService = new pskl.service.InterpolationService();
+    
+    try {
+        // Process frames with strict edge preservation
+        const frameData = await interpolationService.processFramesForRIFE(frame1, frame2);
+        
+        // Add edge verification
+        this.verifyFrameEdges(frameData);
+        
+        return frameData;
+    } catch (error) {
+        console.error('Error processing frame pair:', error);
+        throw error;
+    }
+  };
+
+  ns.GenerateFramesController.prototype.verifyFrameEdges = function(frameData) {
+    const verifyEdges = (blob) => {
+        return createImageBitmap(blob).then(bitmap => {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(bitmap, 0, 0);
+            
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            
+            // Verify no partial transparency exists
+            for (let i = 0; i < data.length; i += 4) {
+                if (data[i + 3] > 0 && data[i + 3] < 255) {
+                    console.warn('Found partial transparency, fixing...');
+                    data[i + 3] = data[i + 3] > 128 ? 255 : 0;
+                }
+            }
+            
+            ctx.putImageData(imageData, 0, 0);
+            return new Promise(resolve => canvas.toBlob(resolve, 'image/png', 1.0));
+        });
+    };
+    
+    return Promise.all([
+        verifyEdges(frameData.blob1),
+        verifyEdges(frameData.blob2)
+    ]).then(([blob1, blob2]) => {
+        frameData.blob1 = blob1;
+        frameData.blob2 = blob2;
+        return frameData;
+    });
   };
 
   ns.GenerateFramesController.prototype.destroy = function () {
