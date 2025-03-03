@@ -94,6 +94,11 @@
   };
 
   ns.SelectionManager.prototype.paste = function(event, domEvent) {
+    // Ignore clipboard events from the AI Palette API key input
+    if (domEvent && domEvent.target && domEvent.target.classList.contains('ai-palette-api-key-input')) {
+      return;
+    }
+
     var items = domEvent ? domEvent.clipboardData.items : [];
 
     try {
@@ -133,22 +138,28 @@
 
   ns.SelectionManager.prototype.pasteText_ = function(clipboardItem) {
     var blob = clipboardItem.getAsString(function (selectionString) {
-      var selectionData = JSON.parse(selectionString);
-      var time = selectionData.time;
-      var pixels = selectionData.pixels;
+      try {
+        // Try to parse as JSON
+        var selectionData = JSON.parse(selectionString);
+        var time = selectionData.time;
+        var pixels = selectionData.pixels;
 
-      if (this.currentSelection && this.currentSelection.time >= time) {
-        // If the local selection is newer or equal to the one coming from the clipboard event
-        // use the local one. The reason is that the "move" information is only updated locally
-        // without synchronizing it to the clipboard.
-        // TODO: the selection should store the origin of the selection and the selection itself
-        // separately.
-        pixels = this.currentSelection.pixels;
-      }
+        if (this.currentSelection && this.currentSelection.time >= time) {
+          // If the local selection is newer or equal to the one coming from the clipboard event
+          // use the local one. The reason is that the "move" information is only updated locally
+          // without synchronizing it to the clipboard.
+          // TODO: the selection should store the origin of the selection and the selection itself
+          // separately.
+          pixels = this.currentSelection.pixels;
+        }
 
-      if (pixels) {
-        // If the current clipboard data is some random text, pixels will not be defined.
-        this.pastePixelsOnCurrentFrame_(pixels);
+        if (pixels) {
+          // If the current clipboard data is some random text, pixels will not be defined.
+          this.pastePixelsOnCurrentFrame_(pixels);
+        }
+      } catch (e) {
+        // If the clipboard content is not valid JSON, ignore it silently
+        console.log('Clipboard content is not valid JSON, ignoring:', e);
       }
     }.bind(this));
   };

@@ -10,6 +10,10 @@
       template : 'templates/dialogs/create-palette.html',
       controller : ns.CreatePaletteController
     },
+    'ai-palette' : {
+      template : 'templates/dialogs/ai-palette.html',
+      controller : ns.AIPaletteController
+    },
     'browse-local' : {
       template : 'templates/dialogs/browse-local.html',
       controller : ns.BrowseLocalController

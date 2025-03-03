@@ -16,6 +16,7 @@
     this.colorPaletteSelect_ = document.querySelector('.palettes-list-select');
 
     var createPaletteButton_ = document.querySelector('.create-palette-button');
+    var aiPaletteButton_ = document.querySelector('.ai-palette-button');
     var editPaletteButton_ = document.querySelector('.edit-palette-button');
 
     this.colorPaletteSelect_.addEventListener('change', this.onPaletteSelected_.bind(this));
@@ -23,6 +24,7 @@
     this.colorListContainer_.addEventListener('contextmenu', this.onColorContainerContextMenu.bind(this));
 
     createPaletteButton_.addEventListener('click', this.onCreatePaletteClick_.bind(this));
+    aiPaletteButton_.addEventListener('click', this.onAIPaletteClick_.bind(this));
     editPaletteButton_.addEventListener('click', this.onEditPaletteClick_.bind(this));
 
     $.subscribe(Events.PALETTE_LIST_UPDATED, this.onPaletteListUpdated.bind(this));
@@ -158,6 +160,12 @@
     $.publish(Events.DIALOG_SHOW, {
       dialogId : 'create-palette',
       initArgs : paletteId
+    });
+  };
+
+  ns.PalettesListController.prototype.onAIPaletteClick_ = function (evt) {
+    $.publish(Events.DIALOG_SHOW, {
+      dialogId : 'ai-palette'
     });
   };
 

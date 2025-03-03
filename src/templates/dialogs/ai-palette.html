@@ -1,0 +1,27 @@
+<script type="text/template" id="templates/dialogs/ai-palette.html">
+  <div class="dialog-wrapper ai-palette">
+    <h3 class="dialog-head">
+      <span class="dialog-title">Create AI Palette</span>
+      <span class="dialog-close">X</span>
+    </h3>
+    <div class="dialog-content">
+      <div class="dialog-section">
+        <label for="ai-palette-api-key">OpenAI API Key:</label>
+        <input type="password" class="ai-palette-api-key-input textfield" id="ai-palette-api-key" placeholder="Enter your OpenAI API key">
+      </div>
+      <div class="dialog-section">
+        <label for="ai-palette-theme">Theme/Description:</label>
+        <textarea class="ai-palette-theme-input textfield" id="ai-palette-theme" placeholder="Describe your desired color palette theme (e.g., sunset over ocean, vibrant forest in autumn, cyberpunk city at night)" rows="3"></textarea>
+      </div>
+      <div class="dialog-section">
+        <label for="ai-palette-size">Number of Colors (2-32):</label>
+        <input type="number" class="ai-palette-size-input textfield" id="ai-palette-size" value="8" min="2" max="32">
+      </div>
+      <div class="colors-list">AI generated palettes will show here.</div>
+      <div class="ai-palette-actions">
+        <button class="button" data-action="generate">Generate</button>
+        <button class="button" data-action="save" style="display: none;">Save Palette</button>
+      </div>
+    </div>
+  </div>
+</script> 

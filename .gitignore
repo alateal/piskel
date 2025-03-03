@@ -51,6 +51,7 @@ dest/
 venv/
 
 rife-server-venv/
+rife-server-venv-new/
 scripts/start-rife-server.sh
 
 # RIFE model files
@@ -58,3 +59,5 @@ download_models.sh
 src/server/
 verify_model.py
 scripts/download_model.sh
+
+ai_palette_generator_tasks.md

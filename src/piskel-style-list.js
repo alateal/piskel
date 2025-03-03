@@ -22,6 +22,7 @@
   "css/dialogs-browse-local.css",
   "css/dialogs-cheatsheet.css",
   "css/dialogs-create-palette.css",
+  "css/dialogs-ai-palette.css",
   "css/dialogs-import.css",
   "css/dialogs-performance-info.css",
   "css/dialogs-unsupported-browser.css",

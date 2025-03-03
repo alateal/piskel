@@ -162,6 +162,7 @@
   "js/controller/dialogs/PerformanceInfoController.js",
   "js/controller/dialogs/UnsupportedBrowserController.js",
   "js/controller/dialogs/GenerateFramesController.js",
+  "js/controller/dialogs/AIPaletteController.js",
 
   // Dialogs controller
   "js/controller/dialogs/DialogsController.js",
